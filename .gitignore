@@ -1,0 +1,23 @@
+# Build outputs
+bin/
+obj/
+
+# Local SDK / tooling state
+.dotnet/
+.dotnet-cli/
+.qnn-*/
+.vs/
+.vscode/
+
+# Android / signing
+*.keystore
+*.jks
+*.idsig
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# Logs / temporary files
+*.log
+*.tmp

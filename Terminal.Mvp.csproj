@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0-android</TargetFramework>
+    <RuntimeIdentifier>android-arm64</RuntimeIdentifier>
+    <OutputType>Exe</OutputType>
+    <ApplicationId>dev.mansfieldplumbing.terminal.mvp</ApplicationId>
+    <ApplicationVersion>2</ApplicationVersion>
+    <ApplicationDisplayVersion>0.2</ApplicationDisplayVersion>
+    <SupportedOSPlatformVersion>26</SupportedOSPlatformVersion>
+    <PublishTrimmed>false</PublishTrimmed>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <AndroidNativeLibrary Remove="**\*.so" />
+    <Compile Include="MainActivity.cs" />
+    <Compile Include="PowerShellService.cs" />
+    <Compile Include="AndroidAnimationRunnable.cs" />
+    <Compile Include="AndroidServiceConnection.cs" />
+    <Compile Include="BinderProbeService.cs" />
+    <Compile Include="QnnMatMulProof.cs" />
+    <Compile Include="QnnMatMulAddProof.cs" />
+    <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.7.0-preview.2">
+      <ExcludeAssets>native</ExcludeAssets>
+    </PackageReference>
+    <AndroidAsset Include="profile.ps1" />
+    <AndroidAsset Include="binder-lab.ps1" />
+    <AndroidAsset Include="service.ps1" />
+    <AndroidAsset Include="terminal-state.ps1" />
+    <AndroidAsset Include="terminal.ps1" />
+    <AndroidAsset Include="canvastest.ps1" />
+    <AndroidAsset Include="canvastest-dedicated-ui-runspace.ps1" />
+    <AndroidAsset Include="pscustomobject-runspace-mutation.ps1" />
+    <AndroidAsset Include="qnn-matmul-proof.ps1" />
+    <AndroidAsset Include="qnn-matmul-add-proof.ps1" />
+    <AndroidAsset Include="android.types.ps1xml" />
+    <AndroidAsset Include="android.format.ps1xml" />
+    <AndroidNativeLibrary Include="native\arm64-v8a\libpsl-android.so" Link="arm64-v8a\libpsl-android.so" />
+    <AndroidNativeLibrary Include="native\arm64-v8a\libQnnHtp.so" Link="arm64-v8a\libQnnHtp.so" />
+    <AndroidNativeLibrary Include="native\arm64-v8a\libQnnHtpPrepare.so" Link="arm64-v8a\libQnnHtpPrepare.so" />
+    <AndroidNativeLibrary Include="native\arm64-v8a\libQnnHtpV73Stub.so" Link="arm64-v8a\libQnnHtpV73Stub.so" />
+    <AndroidNativeLibrary Include="native\arm64-v8a\libQnnHtpV73Skel.so" Link="arm64-v8a\libQnnHtpV73Skel.so" />
+  </ItemGroup>
+</Project>
