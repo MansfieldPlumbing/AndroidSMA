@@ -398,8 +398,8 @@ function Receive-ActivityAttached {
         $global:BinderLab.UiThread = Invoke-UiThreadAffinityReceipt -Activity $Event.Activity -View $script:AndroidCanvasEdge.Surface
     }
     [string] $surfaceName = $Event.Intent?.GetStringExtra('surface')
-    if ($surfaceName -notin 'terminal.ps1','canvastest.ps1','canvastest-dedicated-ui-runspace.ps1') {
-        $surfaceName = 'terminal.ps1'
+    if ($surfaceName -notin 'start.ps1','qnn-ui.ps1','terminal.ps1','canvastest.ps1','canvastest-dedicated-ui-runspace.ps1') {
+        $surfaceName = 'start.ps1'
     }
     if ($surfaceName -eq 'canvastest-dedicated-ui-runspace.ps1') {
         Invoke-DedicatedUiRunspaceCanvasTest -Event $Event

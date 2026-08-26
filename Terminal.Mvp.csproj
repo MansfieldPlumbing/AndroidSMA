@@ -3,7 +3,7 @@
     <TargetFramework>net11.0-android</TargetFramework>
     <RuntimeIdentifier>android-arm64</RuntimeIdentifier>
     <OutputType>Exe</OutputType>
-    <ApplicationId>dev.mansfieldplumbing.terminal.mvp</ApplicationId>
+    <ApplicationId>dev.mansfieldplumbing.androidsma.preview</ApplicationId>
     <ApplicationVersion>2</ApplicationVersion>
     <ApplicationDisplayVersion>0.2</ApplicationDisplayVersion>
     <SupportedOSPlatformVersion>26</SupportedOSPlatformVersion>
@@ -29,6 +29,7 @@
     <AndroidAsset Include="profile.ps1" />
     <AndroidAsset Include="binder-lab.ps1" />
     <AndroidAsset Include="service.ps1" />
+    <AndroidAsset Include="start.ps1" />
     <AndroidAsset Include="terminal-state.ps1" />
     <AndroidAsset Include="terminal.ps1" />
     <AndroidAsset Include="canvastest.ps1" />

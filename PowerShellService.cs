@@ -157,7 +157,7 @@ public sealed class PowerShellService : Service
             Directory.CreateDirectory(scripts);
             foreach (string name in new[]
                      {
-                         "profile.ps1", "binder-lab.ps1", "service.ps1", "terminal-state.ps1", "terminal.ps1", "canvastest.ps1",
+                         "profile.ps1", "binder-lab.ps1", "service.ps1", "start.ps1", "terminal-state.ps1", "terminal.ps1", "canvastest.ps1",
                          "canvastest-dedicated-ui-runspace.ps1", "pscustomobject-runspace-mutation.ps1", "qnn-matmul-proof.ps1",
                          "qnn-matmul-add-proof.ps1",
                          "android.types.ps1xml", "android.format.ps1xml"

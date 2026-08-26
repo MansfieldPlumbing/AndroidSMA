@@ -7,7 +7,7 @@ namespace TerminalMvp;
 
 [Activity(
     Name = "dev.mansfieldplumbing.terminal.MainActivity",
-    Label = "PowerShell",
+    Label = "AndroidSMA Preview",
     MainLauncher = true,
     Exported = true,
     LaunchMode = LaunchMode.SingleTop,
@@ -60,6 +60,12 @@ public sealed class MainActivity : Activity
             return;
         }
         PowerShellService.Attach(this, intent);
+    }
+
+    protected override void OnRestart()
+    {
+        base.OnRestart();
+        PowerShellService.Attach(this, Intent);
     }
 
     protected override void OnDestroy()
