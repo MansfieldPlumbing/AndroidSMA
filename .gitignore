@@ -4,10 +4,18 @@ obj/
 
 # Local SDK / tooling state
 .dotnet/
+.dotnet-p7/
 .dotnet-cli/
 .qnn-*/
 .vs/
 .vscode/
+
+# Local package / runtime investigation scratch
+*.nupkg
+*.nupkg.zip
+android-coreclr-host-arm/
+runtime-android-arm/
+apk-inspect/
 
 # Android / signing
 *.keystore
