@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application
+      android:label="AndroidSMA"
+      android:extractNativeLibs="true">
+    <!--
+      ANDROID API 36+ ONLY. Experimental AppFunctions entry point for
+      system-privileged agents. This service stages PROFILE.PS1.pending and
+      cannot replace PROFILE.PS1 without explicit Activity confirmation.
+    -->
+    <service
+        android:name="dev.mansfieldplumbing.androidsma.ProfileRepairAppFunctionService"
+        android:permission="android.permission.BIND_APP_FUNCTION_SERVICE"
+        android:exported="true">
+      <property
+          android:name="android.app.appfunctions.schema"
+          android:value="app_functions_schema.xsd" />
+      <property
+          android:name="android.app.appfunctions.v2"
+          android:value="profile_repair_app_functions.xml" />
+      <property
+          android:name="android.app.appfunctions"
+          android:value="profile_repair_app_functions.xml" />
+      <intent-filter>
+        <action android:name="android.app.appfunctions.AppFunctionService" />
+      </intent-filter>
+    </service>
+  </application>
+</manifest>

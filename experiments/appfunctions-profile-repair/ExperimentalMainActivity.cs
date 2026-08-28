@@ -1,11 +1,15 @@
 using System.Management.Automation;
 using System.Management.Automation.Runspaces;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using Android.App;
+using Android.App.AppFunctions;
+using Android.App.AppSearch;
 using Android.Content;
 using Android.Content.PM;
 using Android.OS;
 using Android.Provider;
+using Android.Runtime;
 using Android.Util;
 using Android.Views;
 using Android.Widget;
@@ -28,6 +32,7 @@ public sealed class MainActivity : Activity
     private static Runspace? s_runspace;
 
     private string ProfilePath => Path.Combine(FilesDir!.AbsolutePath, "PROFILE.PS1");
+    private string PendingProfilePath => Path.Combine(FilesDir!.AbsolutePath, "PROFILE.PS1.pending");
 
     protected override void OnCreate(Bundle? state)
     {
@@ -37,6 +42,16 @@ public sealed class MainActivity : Activity
 
     private void StartProfile()
     {
+        if (File.Exists(PendingProfilePath))
+        {
+            long bytes = new FileInfo(PendingProfilePath).Length;
+            ShowRecovery("REPAIR PENDING",
+                "source: " + PendingProfilePath +
+                "\nbytes: " + bytes +
+                "\nmessage: Apply or reject the staged PROFILE.PS1 repair.");
+            return;
+        }
+
         if (!File.Exists(ProfilePath))
         {
             ShowRecovery(":(", FormatFailure(
@@ -200,12 +215,24 @@ public sealed class MainActivity : Activity
         scroll.AddView(message);
         layout.AddView(scroll, messageLayout);
 
-        if (title == ":(")
+        if (title == "REPAIR PENDING")
+        {
+            AddButton(layout, "APPLY PROFILE.PS1", () =>
+            {
+                File.Move(PendingProfilePath, ProfilePath, overwrite: true);
+                Retry();
+            });
+            AddButton(layout, "REJECT", () =>
+            {
+                File.Delete(PendingProfilePath);
+                StartProfile();
+            });
+        }
+        else if (title == ":(")
             AddButton(layout, "COPY TO CLIPBOARD", () =>
             {
                 var clipboard = (ClipboardManager)GetSystemService(ClipboardService)!;
-                clipboard.PrimaryClip = ClipData.NewPlainText(
-                    "AndroidSMA startup failure", BuildClipboardPayload(details));
+                clipboard.PrimaryClip = ClipData.NewPlainText("AndroidSMA error", details);
             });
         AddButton(layout, "HELP", () =>
         {
@@ -228,27 +255,12 @@ public sealed class MainActivity : Activity
             help.SetPositiveButton("OK", (_, _) => { });
             help.Show();
         });
-        AddButton(layout, "IMPORT FILE", Pick);
-        AddButton(layout, "RETRY", Retry);
+        if (title != "REPAIR PENDING")
+        {
+            AddButton(layout, "IMPORT FILE", Pick);
+            AddButton(layout, "RETRY", Retry);
+        }
         SetContentView(layout);
-    }
-
-    private string BuildClipboardPayload(string details)
-    {
-        string profile;
-        try
-        {
-            profile = File.ReadAllText(ProfilePath);
-        }
-        catch
-        {
-            return "ANDROIDSMA STARTUP FAILURE\n\n" + details +
-                "\n\nPROFILE.PS1: unavailable";
-        }
-
-        return "ANDROIDSMA STARTUP FAILURE\n\n" + details +
-            "\n\n--- PROFILE.PS1 BEGIN ---\n\n" + profile +
-            "\n\n--- PROFILE.PS1 END ---";
     }
 
     private void AddButton(LinearLayout parent, string text, Action action)
@@ -336,5 +348,82 @@ public sealed class MainActivity : Activity
         : Exception("PROFILE.PS1 reported one or more errors.")
     {
         public ErrorRecord[] Errors { get; } = errors.ToArray();
+    }
+}
+
+/*
+ * ANDROID API 36+ ONLY — EXPERIMENTAL APPFUNCTIONS ADMISSION SEAM.
+ *
+ * This concrete Service exists because Android AppFunctions requires an
+ * AppFunctionService for system-privileged agents. It is not an AndroidSMA
+ * lifetime service and does not own SMA, PowerShell, UI, or application state.
+ *
+ * The function never replaces PROFILE.PS1. It writes PROFILE.PS1.pending and
+ * opens MainActivity. The user must explicitly select APPLY PROFILE.PS1 before
+ * the active profile changes. Devices below API 36 cannot invoke this type.
+ */
+[SupportedOSPlatform("android36.0")]
+[Service(
+    Name = "dev.mansfieldplumbing.androidsma.ProfileRepairAppFunctionService",
+    Permission = "android.permission.BIND_APP_FUNCTION_SERVICE",
+    Exported = true)]
+public sealed class ProfileRepairAppFunctionService : AppFunctionService
+{
+    private const string FunctionId =
+        "AndroidSMA.ProfileRepairAppFunctionService#stageProfileRepair";
+
+    public override void OnExecuteFunction(
+        ExecuteAppFunctionRequest request,
+        string callingPackage,
+        SigningInfo callingPackageSigningInfo,
+        CancellationSignal cancellationSignal,
+        IOutcomeReceiver callback)
+    {
+        try
+        {
+            if (request.FunctionIdentifier != FunctionId)
+                throw new AppFunctionException(
+                    AppFunctionError.FunctionNotFound, "Unknown function.");
+
+            string? profileText = request.Parameters.GetPropertyString("profileText");
+            if (string.IsNullOrWhiteSpace(profileText))
+                throw new AppFunctionException(
+                    AppFunctionError.InvalidArgument, "profileText is required.");
+
+            byte[] bytes = System.Text.Encoding.UTF8.GetBytes(profileText);
+            if (bytes.Length > 1_048_576)
+                throw new AppFunctionException(
+                    AppFunctionError.InvalidArgument, "profileText exceeds 1 MiB.");
+
+            string pending = Path.Combine(FilesDir!.AbsolutePath, "PROFILE.PS1.pending");
+            string incoming = pending + ".incoming";
+            using (var target = new FileStream(
+                       incoming, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                target.Write(bytes);
+                target.Flush(flushToDisk: true);
+            }
+            File.Move(incoming, pending, overwrite: true);
+
+            var open = new Intent(this, typeof(MainActivity));
+            open.AddFlags(ActivityFlags.NewTask | ActivityFlags.ClearTop);
+            StartActivity(open);
+
+            var resultBuilder = new GenericDocument.Builder("androidsma", "stage", "result");
+            resultBuilder.SetPropertyString(ExecuteAppFunctionResponse.PropertyReturnValue,
+                ["PROFILE.PS1 staged. User confirmation is required in AndroidSMA."]);
+            GenericDocument result = resultBuilder.Build();
+            callback.OnResult(new ExecuteAppFunctionResponse(result));
+        }
+        catch (AppFunctionException error)
+        {
+            callback.OnError(error.JavaCast<Java.Lang.Object>());
+        }
+        catch (Exception error)
+        {
+            var appError = new AppFunctionException(
+                AppFunctionError.AppUnknownError, error.Message);
+            callback.OnError(appError.JavaCast<Java.Lang.Object>());
+        }
     }
 }

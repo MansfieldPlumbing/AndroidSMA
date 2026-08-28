@@ -13,8 +13,8 @@ $Clang = Join-Path $NdkRoot `
 $Source = Join-Path $PSScriptRoot 'libc.null.c'
 $NativeRoot = Split-Path $PSScriptRoot -Parent
 $OutputDir = Join-Path $NativeRoot 'arm64-v8a'
-$Output = Join-Path $OutputDir 'libpsl-android.so'
-$Candidate = Join-Path $env:TEMP 'libpsl-android.rebuild.so'
+$Output = Join-Path $OutputDir 'libpsl-native.so'
+$Candidate = Join-Path $env:TEMP 'libpsl-native.rebuild.so'
 
 if (-not (Test-Path $Clang)) {
     throw "Android clang not found: $Clang"
@@ -39,7 +39,7 @@ $Actual = (Get-FileHash $Candidate -Algorithm SHA256).Hash
 
 if ($Actual -ne $ExpectedSha256) {
     throw @"
-libpsl-android.so reproducibility failure.
+libpsl-native.so reproducibility failure.
 
 Expected: $ExpectedSha256
 Actual:   $Actual

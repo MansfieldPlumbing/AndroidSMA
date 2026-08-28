@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0-android</TargetFramework>
+    <RuntimeIdentifier>android-arm64</RuntimeIdentifier>
+    <OutputType>Exe</OutputType>
+    <ApplicationId>dev.mansfieldplumbing.androidsma</ApplicationId>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationDisplayVersion>1.0-appfunctions-experiment</ApplicationDisplayVersion>
+    <SupportedOSPlatformVersion>26</SupportedOSPlatformVersion>
+    <AndroidManifest>AndroidManifest.experimental.xml</AndroidManifest>
+    <PublishTrimmed>false</PublishTrimmed>
+    <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="ExperimentalMainActivity.cs" />
+    <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.7.0-preview.2">
+      <ExcludeAssets>native</ExcludeAssets>
+    </PackageReference>
+    <AndroidNativeLibrary Include="..\..\native\arm64-v8a\libpsl-native.so"
+                          Link="arm64-v8a\libpsl-native.so" />
+    <AndroidAsset Include="app_functions_schema.xsd" />
+    <AndroidAsset Include="profile_repair_app_functions.xml" />
+  </ItemGroup>
+</Project>
