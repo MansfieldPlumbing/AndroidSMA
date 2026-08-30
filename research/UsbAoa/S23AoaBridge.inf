@@ -1,0 +1,143 @@
+; Samsung Galaxy S23 AOA Function Bridge
+;
+; This package binds Microsoft's inbox WinUSB driver to Android Open Accessory
+; interface 0.  It describes a real USB transport plus logical remote functions;
+; it does NOT claim that the Windows kernel owns the phone's internal devices.
+;
+; Physical topology:
+;
+;   USB\VID_18D1&PID_2D00             AOA accessory only
+;   USB\VID_18D1&PID_2D01&MI_00       AOA accessory + ADB, interface 0
+;       bulk OUT 0x01                  Windows -> Android
+;       bulk IN  0x81                  Android -> Windows
+;
+; Logical function bits (combine with bitwise OR):
+;
+;   0x00000001  FLASHLIGHT       CameraManager torch status/on/off
+;   0x00000002  SPEAKER          AudioTrack tone/PCM playback
+;   0x00000004  CAMERA           Camera2 still/stream frames
+;   0x00000008  HEXAGON_V73      QNN HTP execution inside the S23
+;   0x00000010  GENERIC_COMPUTE  NNAPI-selected device fallback
+;
+; Examples:
+;
+;   0x00000001  flashlight only
+;   0x00000003  flashlight + speaker
+;   0x00000007  flashlight + speaker + camera
+;   0x00000018  Hexagon v73 with generic-compute fallback
+;   0x0000001F  every currently defined function
+;
+; Permutation is an application-protocol capability mask.  It cannot change the
+; phone's USB descriptors or create additional physical USB interfaces.  A
+; Windows broker may enumerate software child devices beneath this real AOA
+; parent only for bits confirmed by the Android HELLO response.
+;
+; Protocol framing:
+;
+;   uint32_le byte_count
+;   byte[byte_count] UTF-8 JSON
+;
+; Required first exchange:
+;
+;   OUT {"op":"hello","protocol":1,"requestedMask":31}
+;   IN  {"ok":true,"protocol":1,"availableMask":...,"soc":"SM8550",
+;        "htp":"v73","functions":[...]}
+;
+; Function request targets:
+;
+;   flashlight.* -> Android CameraManager.setTorchMode
+;   speaker.*     -> Android AudioTrack
+;   camera.*      -> Android Camera2 + ImageReader
+;   hexagon.*     -> Android QNN libQnnHtp.so / libQnnHtpV73Stub.so
+;   compute.*     -> Android NNAPI when the QNN HTP path is unavailable
+;
+; Permission gates are capabilities, not pretend successes:
+;
+;   FLASHLIGHT and CAMERA require android.permission.CAMERA in the installed APK
+;   and a runtime grant.  The current AndroidSMA v1 APK declares only INTERNET,
+;   so those bits must remain clear until the permission exists.
+;
+;   HEXAGON_V73 is set only after a QNN HTP graph executes and returns a verified
+;   result.  Merely finding libQnnHtpV73Stub.so does not enable the bit.
+;
+;   GENERIC_COMPUTE is set only after NNAPI enumerates a usable device and a
+;   verification graph completes.  CPU fallback must be reported explicitly.
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = USBDevice
+ClassGUID   = {88BAE032-5A81-49F0-BC3D-A4FF138216D6}
+Provider    = %Provider%
+DriverVer   = 08/29/2026,1.0.0.0
+CatalogFile = S23AoaBridge.cat
+PnpLockdown = 1
+
+[Manufacturer]
+%Provider% = S23Aoa,NTamd64,NTarm64
+
+[S23Aoa.NTamd64]
+%Bridge% = S23Aoa_Install, USB\VID_18D1&PID_2D00
+%Bridge% = S23Aoa_Install, USB\VID_18D1&PID_2D01&MI_00
+
+[S23Aoa.NTarm64]
+%Bridge% = S23Aoa_Install, USB\VID_18D1&PID_2D00
+%Bridge% = S23Aoa_Install, USB\VID_18D1&PID_2D01&MI_00
+
+[S23Aoa_Install]
+Include = winusb.inf
+Needs   = WINUSB.NT
+
+[S23Aoa_Install.Services]
+Include = winusb.inf
+Needs   = WINUSB.NT.Services
+
+[S23Aoa_Install.HW]
+AddReg = S23Aoa_AddReg
+
+[S23Aoa_AddReg]
+; Stable application-facing WinUSB interface already used by the host cartridge.
+HKR,,DeviceInterfaceGUIDs,0x00010000,"{0CF010B1-07A8-4B28-B1C9-A2CFDE8C9953}"
+HKR,,FriendlyName,0x00000000,%Bridge%
+
+; Transport facts.  Endpoint values must still be queried with WinUsb_QueryPipe.
+HKR,Parameters\Transport,Name,0x00000000,"Android Open Accessory bulk"
+HKR,Parameters\Transport,ProtocolVersion,0x00010001,1
+HKR,Parameters\Transport,Framing,0x00000000,"uint32-le-length + utf8-json"
+HKR,Parameters\Transport,ExpectedBulkOut,0x00010001,0x00000001
+HKR,Parameters\Transport,ExpectedBulkIn,0x00010001,0x00000081
+HKR,Parameters\Transport,MaximumFrameBytes,0x00010001,0x00100000
+
+; RequestedMask is policy.  AvailableMask comes from the live Android HELLO and
+; must never be inferred solely from these registry declarations.
+HKR,Parameters\Functions,RequestedMask,0x00010001,0x0000001F
+HKR,Parameters\Functions,DefinedBits,0x00010000,"0x01 FLASHLIGHT","0x02 SPEAKER","0x04 CAMERA","0x08 HEXAGON_V73","0x10 GENERIC_COMPUTE"
+HKR,Parameters\Functions,Permutations,0x00010000,"0x01 flashlight","0x03 flashlight+speaker","0x07 flashlight+speaker+camera","0x18 hexagon-v73|generic-compute","0x1F all-defined"
+
+HKR,Parameters\Function\Flashlight,Bit,0x00010001,0x00000001
+HKR,Parameters\Function\Flashlight,Target,0x00000000,"Android CameraManager torch"
+HKR,Parameters\Function\Flashlight,Operations,0x00010000,"flashlight.status","flashlight.on","flashlight.off"
+HKR,Parameters\Function\Flashlight,Requires,0x00010000,"android.permission.CAMERA","runtime camera grant"
+
+HKR,Parameters\Function\Speaker,Bit,0x00010001,0x00000002
+HKR,Parameters\Function\Speaker,Target,0x00000000,"Android AudioTrack"
+HKR,Parameters\Function\Speaker,Operations,0x00010000,"speaker.status","speaker.tone","speaker.pcm","speaker.stop"
+
+HKR,Parameters\Function\Camera,Bit,0x00010001,0x00000004
+HKR,Parameters\Function\Camera,Target,0x00000000,"Android Camera2 ImageReader"
+HKR,Parameters\Function\Camera,Operations,0x00010000,"camera.list","camera.capture","camera.stream","camera.stop"
+HKR,Parameters\Function\Camera,Requires,0x00010000,"android.permission.CAMERA","runtime camera grant"
+
+HKR,Parameters\Function\HexagonV73,Bit,0x00010001,0x00000008
+HKR,Parameters\Function\HexagonV73,Target,0x00000000,"SM8550 QNN HTP v73 through Android FastRPC"
+HKR,Parameters\Function\HexagonV73,Operations,0x00010000,"hexagon.status","hexagon.load","hexagon.run","hexagon.unload","hexagon.profile"
+HKR,Parameters\Function\HexagonV73,Proof,0x00000000,"verified QNN HTP graph result required"
+
+HKR,Parameters\Function\GenericCompute,Bit,0x00010001,0x00000010
+HKR,Parameters\Function\GenericCompute,Target,0x00000000,"Android NNAPI selected accelerator"
+HKR,Parameters\Function\GenericCompute,Operations,0x00010000,"compute.devices","compute.load","compute.run","compute.unload"
+HKR,Parameters\Function\GenericCompute,Proof,0x00000000,"device enumeration plus verified graph result required"
+
+[Strings]
+Provider = "MansfieldPlumbing"
+Bridge   = "Samsung Galaxy S23 AOA Function Bridge"
+

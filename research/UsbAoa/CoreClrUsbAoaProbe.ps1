@@ -1,0 +1,19 @@
+$ErrorActionPreference='Stop'
+$suffix=[Guid]::NewGuid().ToString('N')
+$assembly=[Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly([Reflection.AssemblyName]::new("UsbAoa.CoreClr.$suffix"),[Reflection.Emit.AssemblyBuilderAccess]::Run)
+$module=$assembly.DefineDynamicModule("UsbAoa.CoreClr.$suffix")
+$type=$module.DefineType("UsbAoa.CoreClr_$suffix",[Reflection.TypeAttributes]'Public,Abstract,Sealed')
+$flags=[Reflection.MethodAttributes]'Public,Static,PinvokeImpl'
+$cc=[Runtime.InteropServices.CallingConvention]::Cdecl
+$cs=[Runtime.InteropServices.CharSet]::Ansi
+$method=$type.DefinePInvokeMethod('open','libc.so','open',$flags,[Reflection.CallingConventions]::Standard,[int32],[Type[]]@([string],[int32]),$cc,$cs)
+$method.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
+$method=$type.DefinePInvokeMethod('close','libc.so','close',$flags,[Reflection.CallingConventions]::Standard,[int32],[Type[]]@([int32]),$cc,[Runtime.InteropServices.CharSet]::None)
+$method.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
+$method=$type.DefinePInvokeMethod('__errno','libc.so','__errno',$flags,[Reflection.CallingConventions]::Standard,[IntPtr],[Type[]]::new(0),$cc,[Runtime.InteropServices.CharSet]::None)
+$method.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
+$native=$type.CreateType()
+$fd=$native::open('/dev/usb_accessory',0x00080002)
+$errno=if($fd-lt0){[Runtime.InteropServices.Marshal]::ReadInt32($native::__errno())}else{0}
+[IO.File]::WriteAllText('/data/user/0/dev.mansfieldplumbing.androidsma/files/CoreClrUsbAoaProbe.txt',"FD=$fd ERRNO=$errno",[Text.UTF8Encoding]::new($false))
+if($fd-ge0){[void]$native::close($fd)}
