@@ -4,22 +4,22 @@ using namespace System.IO
 using namespace System.Management.Automation
 using namespace System.Text
 
-# Minimal PSRP-shaped transport substrate: ordered, length-framed CLIXML Values.
-# It deliberately does not claim MS-PSRP wire compatibility.
+# Ordered values encoded as CLIXML behind a four-byte network-order length.
+# This is a local test wire, not an implementation of a remoting standard.
 
-function Read-PsrpExact {
+function Read-ClixmlExact {
     param([Parameter(Mandatory)] [Stream] $Stream, [Parameter(Mandatory)] [int] $Count)
     $bytes = [byte[]]::new($Count)
     $at = 0
     while ($at -lt $Count) {
         $read = $Stream.Read($bytes, $at, $Count - $at)
-        if ($read -le 0) { throw [EndOfStreamException]::new('PSRP peer closed the stream.') }
+        if ($read -le 0) { throw [EndOfStreamException]::new('CLIXML peer closed the stream.') }
         $at += $read
     }
     $bytes
 }
 
-function Write-PsrpFrame {
+function Write-ClixmlFrame {
     param([Parameter(Mandatory)] [Stream] $Stream, [Parameter(Mandatory)] $Value)
     $xml = [PSSerializer]::Serialize($Value, 8)
     $payload = [Encoding]::UTF8.GetBytes($xml)
@@ -29,14 +29,13 @@ function Write-PsrpFrame {
     $Stream.Flush()
 }
 
-function Read-PsrpFrame {
+function Read-ClixmlFrame {
     param([Parameter(Mandatory)] [Stream] $Stream)
-    $prefix = Read-PsrpExact -Stream $Stream -Count 4
+    $prefix = Read-ClixmlExact -Stream $Stream -Count 4
     $length = [Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($prefix, 0))
     if ($length -lt 1 -or $length -gt 16MB) {
-        throw [InvalidDataException]::new("Invalid PSRP frame length: $length")
+        throw [InvalidDataException]::new("Invalid CLIXML frame length: $length")
     }
-    $payload = Read-PsrpExact -Stream $Stream -Count $length
+    $payload = Read-ClixmlExact -Stream $Stream -Count $length
     [PSSerializer]::Deserialize([Encoding]::UTF8.GetString($payload))
 }
-

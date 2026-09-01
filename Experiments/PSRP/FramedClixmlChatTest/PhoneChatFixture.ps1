@@ -1,7 +1,7 @@
 #requires -Version 7.0
 
 # Small dogfood surface: Android views are the platform membrane; conversation
-# and HTTP behavior live in Bonsai.Chat.ps1. This intentionally performs one
+# and HTTP behavior live in LocalModelChat.ps1. This intentionally performs one
 # synchronous turn per tap. It proves the bridge before we attach it to the
 # packed-cell console and streaming presenter.
 
@@ -15,10 +15,10 @@ trap {
     [Android.Util.Log]::Error('BonsaiBridge', $fault)
     break
 }
-$bridgePath = [IO.Path]::Combine($privateRoot, 'Bonsai.Chat.ps1')
+$bridgePath = [IO.Path]::Combine($privateRoot, 'LocalModelChat.ps1')
 . ([scriptblock]::Create([IO.File]::ReadAllText($bridgePath)))
 
-$script:Bonsai = New-BonsaiChat -Endpoint 'http://127.0.0.1:8080'
+$script:Chat = New-LocalModelChat -Endpoint 'http://127.0.0.1:8080'
 
 $layout = [Android.Widget.LinearLayout]::new($Activity)
 $layout.Orientation = [Android.Widget.Orientation]::Vertical
@@ -62,7 +62,7 @@ $script:Send.add_Click({
     $script:Send.Enabled = $false
     $script:Transcript.Append("`nYOU> $text`n")
     try {
-        $reply = Send-BonsaiChat -Chat $script:Bonsai -Text $text
+        $reply = Send-LocalModelChat -Chat $script:Chat -Text $text
         $script:Transcript.Append("`nBONSAI> $($reply.Content)`n")
         if ($reply.Timings) {
             $script:Transcript.Append(('[{0:N1} prompt tok/s; {1:N1} decode tok/s]`n' -f
@@ -84,9 +84,9 @@ $Activity.SetContentView($layout)
 # this deployment. Normal chat history starts clean after the probe.
 $receiptPath = [IO.Path]::Combine($privateRoot, 'bonsai-bridge-receipt.txt')
 if (-not [IO.File]::Exists($receiptPath)) {
-    $probe = New-BonsaiChat -Endpoint 'http://127.0.0.1:8080'
+    $probe = New-LocalModelChat -Endpoint 'http://127.0.0.1:8080'
     try {
-        $proof = Send-BonsaiChat -Chat $probe -Text 'Reply with exactly: PHONE BONSAI BRIDGE ALIVE' -MaxTokens 32 -Temperature 0
+        $proof = Send-LocalModelChat -Chat $probe -Text 'Reply with exactly: PHONE BONSAI BRIDGE ALIVE' -MaxTokens 32 -Temperature 0
         $receipt = @(
             [DateTimeOffset]::UtcNow.ToString('O')
             $proof.Content
@@ -98,7 +98,7 @@ if (-not [IO.File]::Exists($receiptPath)) {
     } catch {
         $script:Transcript.Append("`nBOOT PROBE FAULT> $($_.Exception.Message)`n")
     } finally {
-        Close-BonsaiChat $probe
+        Close-LocalModelChat $probe
     }
 } else {
     $script:Transcript.Append("`n$([IO.File]::ReadAllText($receiptPath))`n")

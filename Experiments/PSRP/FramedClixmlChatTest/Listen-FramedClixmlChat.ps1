@@ -6,13 +6,13 @@ param(
 )
 
 $root = Split-Path -Parent $PSCommandPath
-. "$root\Bonsai.PsrpWire.ps1"
-. "$root\Bonsai.Chat.ps1"
+. "$root\FramedClixmlWire.ps1"
+. "$root\LocalModelChat.ps1"
 
 $sessions = [Collections.Generic.Dictionary[string, object]]::new()
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse($BindAddress), $Port)
 $listener.Start()
-Write-Host "BONSAI_PSRP_LISTENING ${BindAddress}:$Port"
+Write-Host "FRAMED_CLIXML_CHAT_LISTENING ${BindAddress}:$Port"
 
 try {
     while ($true) {
@@ -20,7 +20,7 @@ try {
         $stream = $client.GetStream()
         try {
             while ($client.Connected) {
-                $frame = Read-PsrpFrame -Stream $stream
+                $frame = Read-ClixmlFrame -Stream $stream
                 $kind = [string]$frame.Kind
                 $sessionId = [string]$frame.SessionId
                 $pipelineId = [string]$frame.PipelineId
@@ -30,28 +30,28 @@ try {
                         if (-not [Security.Cryptography.CryptographicOperations]::FixedTimeEquals(
                             [Text.Encoding]::UTF8.GetBytes([string]$frame.Capability),
                             [Text.Encoding]::UTF8.GetBytes($Capability))) {
-                            throw 'Bonsai PSRP capability rejected.'
+                            throw 'Framed CLIXML chat capability rejected.'
                         }
                         if ([string]::IsNullOrWhiteSpace($sessionId)) {
                             $sessionId = [guid]::NewGuid().ToString('N')
                         }
                         if (-not $sessions.ContainsKey($sessionId)) {
-                            $sessions[$sessionId] = New-BonsaiChat
+                            $sessions[$sessionId] = New-LocalModelChat
                         }
-                        Write-PsrpFrame $stream ([pscustomobject]@{
+                        Write-ClixmlFrame $stream ([pscustomobject]@{
                             Kind = 'SessionState'; SessionId = $sessionId; State = 'Opened'
                         })
                     }
                     'CreatePipeline' {
-                        Write-PsrpFrame $stream ([pscustomobject]@{
+                        Write-ClixmlFrame $stream ([pscustomobject]@{
                             Kind = 'PipelineState'; SessionId = $sessionId
                             PipelineId = $pipelineId; State = 'Running'
                         })
                         try {
                             if (-not $sessions.ContainsKey($sessionId)) {
-                                throw "Unknown Bonsai session: $sessionId"
+                                throw "Unknown chat session: $sessionId"
                             }
-                            if ([string]$frame.Command -ne 'Send-BonsaiChat') {
+                            if ([string]$frame.Command -ne 'Send-LocalModelChat') {
                                 throw "Command is not admitted: $($frame.Command)"
                             }
                             $invoke = @{
@@ -60,21 +60,21 @@ try {
                                 MaxTokens = [int]$frame.MaxTokens
                                 Temperature = [double]$frame.Temperature
                             }
-                            $reply = Send-BonsaiChat @invoke
-                            Write-PsrpFrame $stream ([pscustomobject]@{
+                            $reply = Send-LocalModelChat @invoke
+                            Write-ClixmlFrame $stream ([pscustomobject]@{
                                 Kind = 'Stream'; Stream = 'Output'; SessionId = $sessionId
                                 PipelineId = $pipelineId; Sequence = 0; Value = $reply
                             })
-                            Write-PsrpFrame $stream ([pscustomobject]@{
+                            Write-ClixmlFrame $stream ([pscustomobject]@{
                                 Kind = 'PipelineState'; SessionId = $sessionId
                                 PipelineId = $pipelineId; State = 'Completed'
                             })
                         } catch {
-                            Write-PsrpFrame $stream ([pscustomobject]@{
+                            Write-ClixmlFrame $stream ([pscustomobject]@{
                                 Kind = 'Stream'; Stream = 'Error'; SessionId = $sessionId
                                 PipelineId = $pipelineId; Sequence = 0; Value = $_
                             })
-                            Write-PsrpFrame $stream ([pscustomobject]@{
+                            Write-ClixmlFrame $stream ([pscustomobject]@{
                                 Kind = 'PipelineState'; SessionId = $sessionId
                                 PipelineId = $pipelineId; State = 'Failed'
                             })
@@ -82,14 +82,14 @@ try {
                     }
                     'Close' {
                         if ($sessions.ContainsKey($sessionId)) {
-                            Close-BonsaiChat $sessions[$sessionId]
+                            Close-LocalModelChat $sessions[$sessionId]
                             $sessions.Remove($sessionId)
                         }
-                        Write-PsrpFrame $stream ([pscustomobject]@{
+                        Write-ClixmlFrame $stream ([pscustomobject]@{
                             Kind = 'SessionState'; SessionId = $sessionId; State = 'Closed'
                         })
                     }
-                    default { throw "Unknown PSRP-shaped frame: $kind" }
+                    default { throw "Unknown framed CLIXML message: $kind" }
                 }
             }
         } catch [EndOfStreamException] {
@@ -100,6 +100,6 @@ try {
         }
     }
 } finally {
-    foreach ($chat in $sessions.Values) { Close-BonsaiChat $chat }
+    foreach ($chat in $sessions.Values) { Close-LocalModelChat $chat }
     $listener.Stop()
 }

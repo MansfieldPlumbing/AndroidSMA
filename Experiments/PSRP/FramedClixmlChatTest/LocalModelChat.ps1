@@ -6,7 +6,7 @@ using namespace System.Net.Sockets
 using namespace System.Text
 using namespace System.Text.Json
 
-function Invoke-BonsaiHttpJson {
+function Invoke-LocalModelHttpJson {
     param(
         [Parameter(Mandatory)] [string] $Endpoint,
         [Parameter(Mandatory)] [string] $Path,
@@ -50,7 +50,7 @@ function Invoke-BonsaiHttpJson {
     }
 }
 
-function New-BonsaiChat {
+function New-LocalModelChat {
     param(
         [string] $Endpoint = 'http://127.0.0.1:8080',
         [string] $Model = 'Bonsai-8B-Q1_0.gguf',
@@ -74,7 +74,7 @@ function New-BonsaiChat {
     }
 }
 
-function Reset-BonsaiChat {
+function Reset-LocalModelChat {
     param([Parameter(Mandatory, ValueFromPipeline)] $Chat)
     $system = if ($Chat.Messages.Count -and $Chat.Messages[0].role -eq 'system') {
         $Chat.Messages[0]
@@ -85,7 +85,7 @@ function Reset-BonsaiChat {
     $Chat
 }
 
-function Send-BonsaiChat {
+function Send-LocalModelChat {
     param(
         [Parameter(Mandatory, ValueFromPipeline)] $Chat,
         [Parameter(Mandatory, Position = 0)] [string] $Text,
@@ -107,7 +107,7 @@ function Send-BonsaiChat {
     $json = [JsonSerializer]::Serialize(
         [object]$payload, $payload.GetType(), [JsonSerializerOptions]::new())
     try {
-        $body = Invoke-BonsaiHttpJson -Endpoint $Chat.Endpoint -Path '/v1/chat/completions' -Json $json
+        $body = Invoke-LocalModelHttpJson -Endpoint $Chat.Endpoint -Path '/v1/chat/completions' -Json $json
 
         $document = [JsonDocument]::Parse($body)
         try {
@@ -145,7 +145,7 @@ function Send-BonsaiChat {
     }
 }
 
-function Close-BonsaiChat {
+function Close-LocalModelChat {
     param([Parameter(Mandatory, ValueFromPipeline)] $Chat)
     # One connection per turn for now. Kept as a lifecycle verb so a persistent
     # streaming transport can replace it without changing callers.

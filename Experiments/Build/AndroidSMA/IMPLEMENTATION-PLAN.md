@@ -38,6 +38,26 @@ a fork of recovery behavior.
   retained `.csproj` means generating disposable packaging input under
   `build/<architecture>/`, not pretending the Android packager has no contract.
 
+## Layer discipline
+
+PowerShell uses the public .NET and .NET-for-Android surface already packaged
+with AndroidSMA. It does not reimplement the operating-system service beneath
+that surface.
+
+- Android USB accessory work starts with `Android.Hardware.Usb.UsbManager`, the
+  Activity intent, permission, and `OpenAccessory()`.
+- Internet work starts with `HttpClient` or managed sockets.
+- Android UI work starts with the managed Android view types.
+- Private Binder transaction layouts, guessed OEM transaction numbers, JNI
+  object construction, and direct device-node access are rejected unless the
+  corresponding public API first produces a correctly recorded, reproducible
+  failure.
+- PowerShell collection semantics must be checked before diagnosing a binding.
+  In particular, `@($null)` has count one and is not evidence that Android
+  returned an array containing a broken object.
+
+The build experiment must not turn platform archaeology into product source.
+
 ## Meaning of "compile Recovery.ps1"
 
 The accepted path is:
@@ -124,6 +144,11 @@ gate, verified again from emitted metadata.
   read-only until mutation operations earn separate proof.
 
 ## Build-AndroidSMA.ps1 contract
+
+`AssemblyPolicy.psd1` is the canonical assembly admission wall consumed by the
+build. An APK assembly absent from that data file is a build failure. Refused
+assemblies are fatal; closure-only assemblies require metadata evidence and an
+omission receipt before they may remain.
 
 Proposed command surface:
 
@@ -231,4 +256,3 @@ This work is complete only when a clean checkout can build either architecture
 with one PowerShell command, the APK contains an emitted Activity assembly whose
 behavior traces to `Recovery.ps1`, both device classes pass the recovery matrix,
 and neither C# source nor a retained project file exists in the project.
-
