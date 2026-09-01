@@ -1,0 +1,732 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Compression;
+using System.Linq;
+using System.Reflection;
+using System.Text;
+using System.Xml.Linq;
+using System.Collections.Immutable;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.Diagnostics;
+using Microsoft.CodeAnalysis.Text;
+namespace Subsystem.Capabilities.Management;
+
+// The ouroboros pack — rebuild this self-contained single-file exe IN-PROCESS with the bundled Roslyn and a
+// home-rolled bundle codec: no dotnet SDK, no MSBuild, no external packages. A single-file exe is three
+// regions concatenated — [ native apphost ][ embedded files ][ manifest ]. We reuse our OWN apphost (it
+// already carries the icon and the app-path marker) and swap only the managed assembly; the compile
+// references come from our own bundle. The byte format below is mirrored from the .NET host + AsmResolver.
+
+internal enum BundleFileType : byte
+{
+    Unknown = 0, Assembly = 1, NativeBinary = 2, DepsJson = 3, RuntimeConfigJson = 4, Symbols = 5,
+}
+
+internal sealed class BundleFile
+{
+    public string RelativePath = string.Empty;
+    public BundleFileType Type;
+    public long Offset;
+    public long Size;             // decompressed length
+    public long CompressedSize;   // 0 == stored uncompressed
+    public byte[] StoredBytes = Array.Empty<byte>();   // raw bytes as they sit in the source image
+
+    public byte[] GetData()
+    {
+        if (CompressedSize == 0) return StoredBytes;
+        using var ms = new MemoryStream(StoredBytes);
+        using var deflate = new DeflateStream(ms, CompressionMode.Decompress);
+        var outBuf = new byte[Size];
+        int total = 0;
+        while (total < Size)
+        {
+            int n = deflate.Read(outBuf, total, (int)Size - total);
+            if (n == 0) throw new EndOfStreamException($"deflate ended {total}/{Size} bytes into '{RelativePath}'.");
+            total += n;
+        }
+        return outBuf;
+    }
+}
+
+internal sealed class BundleManifest
+{
+    public uint MajorVersion;
+    public uint MinorVersion;
+    public string BundleId = string.Empty;
+    public ulong Flags;
+    public long DepsJsonOffset, DepsJsonSize, RuntimeConfigOffset, RuntimeConfigSize;
+    public List<BundleFile> Files = new();
+}
+
+internal static class SelfBundle
+{
+    // The 32-byte marker the bundler embeds in the apphost. The manifest offset is the little-endian UInt64
+    // in the 8 bytes immediately BEFORE it. The runtime host reads that fixed location — it does NOT scan.
+    private static readonly byte[] Signature =
+    {
+        0x8b, 0x12, 0x02, 0xb9, 0x6a, 0x61, 0x20, 0x38,
+        0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0, 0x32,
+        0x13, 0xf5, 0xb9, 0xe6, 0xef, 0xae, 0x33, 0x18,
+        0xee, 0x3b, 0x2d, 0xce, 0x24, 0xb3, 0x6a, 0xae,
+    };
+    private const int OffsetSize = 8;
+    private const long AssemblyAlignment = 4096;   // assemblies are page-aligned so the runtime can mmap them
+
+    public static BundleManifest Read(byte[] exe)
+    {
+        int sig = IndexOfSignature(exe);
+        if (sig < OffsetSize) throw new InvalidDataException("no bundle signature in the image.");
+        long manifestOffset = (long)BitConverter.ToUInt64(exe, sig - OffsetSize);
+
+        using var ms = new MemoryStream(exe);
+        ms.Seek(manifestOffset, SeekOrigin.Begin);
+        using var r = new BinaryReader(ms, Encoding.UTF8, leaveOpen: true);
+
+        var m = new BundleManifest { MajorVersion = r.ReadUInt32(), MinorVersion = r.ReadUInt32() };
+        int count = r.ReadInt32();
+        m.BundleId = r.ReadString();
+        if (m.MajorVersion >= 2)
+        {
+            m.DepsJsonOffset = (long)r.ReadUInt64(); m.DepsJsonSize = (long)r.ReadUInt64();
+            m.RuntimeConfigOffset = (long)r.ReadUInt64(); m.RuntimeConfigSize = (long)r.ReadUInt64();
+            m.Flags = r.ReadUInt64();
+        }
+        for (int i = 0; i < count; i++)
+        {
+            var f = new BundleFile { Offset = (long)r.ReadUInt64(), Size = (long)r.ReadUInt64() };
+            if (m.MajorVersion >= 6) f.CompressedSize = (long)r.ReadUInt64();
+            f.Type = (BundleFileType)r.ReadByte();
+            f.RelativePath = r.ReadString();
+
+            long stored = f.CompressedSize != 0 ? f.CompressedSize : f.Size;
+            if (f.Offset < 0 || f.Offset + stored > exe.Length)
+                throw new InvalidDataException($"file '{f.RelativePath}' data out of range.");
+            f.StoredBytes = new byte[stored];
+            Array.Copy(exe, f.Offset, f.StoredBytes, 0, stored);
+            m.Files.Add(f);
+        }
+        return m;
+    }
+
+    public static IReadOnlyList<(string Name, byte[] Image)> ManagedAssemblies(BundleManifest m) =>
+        m.Files.Where(f => f.Type == BundleFileType.Assembly).Select(f => (f.RelativePath, f.GetData())).ToList();
+
+    public static byte[] Write(byte[] originalExe, BundleManifest m, IDictionary<string, byte[]> replacements)
+    {
+        if (m.Files.Count == 0) throw new InvalidOperationException("empty manifest.");
+
+        long apphostSize = m.Files.Min(f => f.Offset);   // template = the native host (keeps icon + app-path marker)
+        using var outMs = new MemoryStream();
+        outMs.Write(originalExe, 0, (int)apphostSize);
+
+        var written = new List<BundleFile>(m.Files.Count);
+        foreach (var f in m.Files)
+        {
+            byte[] payload; long size, compressed;
+            if (replacements.TryGetValue(f.RelativePath, out var repl)) { payload = repl; size = repl.Length; compressed = 0; }
+            else { payload = f.StoredBytes; size = f.Size; compressed = f.CompressedSize; }
+
+            if (f.Type == BundleFileType.Assembly)
+            {
+                long pad = (AssemblyAlignment - (outMs.Position % AssemblyAlignment)) % AssemblyAlignment;
+                if (pad != 0) outMs.Write(new byte[pad], 0, (int)pad);
+            }
+            long offset = outMs.Position;
+            outMs.Write(payload, 0, payload.Length);
+            written.Add(new BundleFile { RelativePath = f.RelativePath, Type = f.Type, Offset = offset, Size = size, CompressedSize = compressed });
+        }
+
+        var deps = written.FirstOrDefault(f => f.Type == BundleFileType.DepsJson);
+        var rtc = written.FirstOrDefault(f => f.Type == BundleFileType.RuntimeConfigJson);
+
+        long manifestOffset = outMs.Position;
+        using (var w = new BinaryWriter(outMs, new UTF8Encoding(false), leaveOpen: true))
+        {
+            w.Write(m.MajorVersion); w.Write(m.MinorVersion); w.Write(written.Count); w.Write(m.BundleId);
+            if (m.MajorVersion >= 2)
+            {
+                w.Write((ulong)(deps?.Offset ?? 0)); w.Write((ulong)(deps?.Size ?? 0));
+                w.Write((ulong)(rtc?.Offset ?? 0)); w.Write((ulong)(rtc?.Size ?? 0));
+                w.Write(m.Flags);
+            }
+            foreach (var f in written)
+            {
+                w.Write((ulong)f.Offset); w.Write((ulong)f.Size);
+                if (m.MajorVersion >= 6) w.Write((ulong)f.CompressedSize);
+                w.Write((byte)f.Type); w.Write(f.RelativePath);
+            }
+        }
+
+        byte[] newExe = outMs.ToArray();
+        // Patch the apphost's existing marker IN PLACE — the 8 bytes before its embedded signature. Append
+        // nothing: a trailing signature leaves the host reading the stale marker and the exe will not launch.
+        int sig = IndexOfSignature(newExe);
+        if (sig < OffsetSize) throw new InvalidDataException("apphost signature missing from the packed image.");
+        BitConverter.GetBytes((ulong)manifestOffset).CopyTo(newExe, sig - OffsetSize);
+
+        // Prove the codec round-trips. NOTE: this does NOT prove the exe launches — only `ss diag` on it does.
+        var check = Read(newExe);
+        if (check.Files.Count != written.Count) throw new InvalidDataException("post-pack file-count mismatch.");
+        return newExe;
+    }
+
+    // Forward scan: the apphost is at the file head, so its signature has the lowest index — found before any
+    // astronomically-unlikely coincidental match in the payload.
+    private static int IndexOfSignature(byte[] bytes)
+    {
+        int last = bytes.Length - Signature.Length;
+        for (int i = 0; i <= last; i++)
+        {
+            int j = 0;
+            while (j < Signature.Length && bytes[i + j] == Signature[j]) j++;
+            if (j == Signature.Length) return i;
+        }
+        return -1;
+    }
+
+    // The entry assembly = the managed dll the host launches. The runtimeconfig is named after it
+    // (<app>.runtimeconfig.json -> <app>.dll); fall back to the deps.json name.
+    public static string EntryAssembly(BundleManifest m)
+    {
+        var rtc = m.Files.FirstOrDefault(f => f.Type == BundleFileType.RuntimeConfigJson);
+        if (rtc != null && rtc.RelativePath.EndsWith(".runtimeconfig.json", StringComparison.OrdinalIgnoreCase))
+            return rtc.RelativePath[..^".runtimeconfig.json".Length] + ".dll";
+        var deps = m.Files.FirstOrDefault(f => f.Type == BundleFileType.DepsJson);
+        if (deps != null && deps.RelativePath.EndsWith(".deps.json", StringComparison.OrdinalIgnoreCase))
+            return deps.RelativePath[..^".deps.json".Length] + ".dll";
+        throw new InvalidOperationException("could not derive the entry assembly (no runtimeconfig/deps in bundle).");
+    }
+}
+
+internal static class SelfBuild
+{
+    // `ss build self` — the zero-dotnet rebuild. Read our own bundle, compile the SubsystemWin source with
+    // the bundled Roslyn against the bundle's own assemblies, swap the managed dll, re-pack. Returns the new
+    // exe bytes or the compile diagnostics.
+    public static (byte[]? Exe, string[]? Errors) Compile(string sourceRoot, IEnumerable<SyntaxTree>? overrideTrees = null)
+    {
+        var exePath = Environment.ProcessPath ?? throw new InvalidOperationException("no process path.");
+        var exe = File.ReadAllBytes(exePath);
+        var manifest = SelfBundle.Read(exe);
+
+        string entryDll = SelfBundle.EntryAssembly(manifest);
+        if (!manifest.Files.Any(f => f.Type == BundleFileType.Assembly && f.RelativePath.Equals(entryDll, StringComparison.OrdinalIgnoreCase)))
+            return (null, new[] { $"derived entry assembly '{entryDll}' is not in the bundle." });
+        string asmName = Path.GetFileNameWithoutExtension(entryDll);
+
+        // Compile CodeContext.dll first if the folder exists
+        string codeContextDir = Path.Combine(sourceRoot, "src", "tools", "CodeContext");
+        byte[]? codeContextBytes = null;
+        if (Directory.Exists(codeContextDir))
+        {
+            var ccFiles = Directory.GetFiles(codeContextDir, "*.cs", SearchOption.AllDirectories)
+                .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}") &&
+                            !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}"))
+                .ToList();
+            
+            var ccTrees = ccFiles.Select(p => CSharpSyntaxTree.ParseText(File.ReadAllText(p), path: p)).ToList();
+            
+            // CodeContext references: all bundle assemblies except CodeContext.dll itself and ss.dll
+            var ccRefs = SelfBundle.ManagedAssemblies(manifest)
+                .Where(a => !a.Name.Equals("CodeContext.dll", StringComparison.OrdinalIgnoreCase) &&
+                            !a.Name.Equals(entryDll, StringComparison.OrdinalIgnoreCase))
+                .Select(a => (MetadataReference)MetadataReference.CreateFromImage(a.Image))
+                .ToList();
+            
+            var ccOptions = new CSharpCompilationOptions(
+                OutputKind.DynamicallyLinkedLibrary,
+                optimizationLevel: OptimizationLevel.Release,
+                allowUnsafe: true,
+                nullableContextOptions: NullableContextOptions.Enable);
+            
+            var ccComp = CSharpCompilation.Create("CodeContext", ccTrees, ccRefs, ccOptions);
+            using var ccPe = new MemoryStream();
+            var ccResult = ccComp.Emit(ccPe);
+            if (!ccResult.Success)
+            {
+                return (null, ccResult.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error)
+                    .Select(d => "CodeContext: " + d.ToString()).ToArray());
+            }
+            codeContextBytes = ccPe.ToArray();
+            Console.WriteLine($"  [csproj] compiled CodeContext.dll ({codeContextBytes.Length} bytes)");
+        }
+
+        // Reference every managed assembly in the bundle EXCEPT the one we are recompiling.
+        // For CodeContext.dll, if we recompiled it, reference the new compiled bytes!
+        var references = new List<MetadataReference>();
+        foreach (var a in SelfBundle.ManagedAssemblies(manifest))
+        {
+            if (a.Name.Equals(entryDll, StringComparison.OrdinalIgnoreCase)) continue;
+            
+            if (a.Name.Equals("CodeContext.dll", StringComparison.OrdinalIgnoreCase) && codeContextBytes != null)
+            {
+                references.Add(MetadataReference.CreateFromImage(codeContextBytes));
+            }
+            else
+            {
+                references.Add(MetadataReference.CreateFromImage(a.Image));
+            }
+        }
+
+        var csprojPath = Path.Combine(sourceRoot, "src", "runspace", "windows", "SubsystemWin.csproj");
+        if (!File.Exists(csprojPath))
+            return (null, new[] { $"project file '{csprojPath}' not found." });
+
+        XDocument doc;
+        try
+        {
+            doc = XDocument.Load(csprojPath);
+        }
+        catch (Exception ex)
+        {
+            return (null, new[] { $"failed to load project file: {ex.Message}" });
+        }
+
+        var baseDir = Path.GetDirectoryName(csprojPath)!;
+        var sourceFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Default compile files in baseDir recursively (excluding bin/ and obj/)
+        foreach (var file in Directory.GetFiles(baseDir, "*.cs", SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(baseDir, file);
+            if (rel.StartsWith("bin" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                rel.StartsWith("obj" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            sourceFiles.Add(Path.GetFullPath(file));
+        }
+
+        // Parse compile elements
+        foreach (var compile in doc.Descendants("Compile"))
+        {
+            var include = compile.Attribute("Include")?.Value;
+            var exclude = compile.Attribute("Exclude")?.Value;
+            var remove = compile.Attribute("Remove")?.Value;
+
+            if (!string.IsNullOrEmpty(include))
+            {
+                foreach (var f in ResolveWildcards(baseDir, include))
+                    sourceFiles.Add(Path.GetFullPath(f));
+            }
+            if (!string.IsNullOrEmpty(exclude))
+            {
+                foreach (var f in ResolveWildcards(baseDir, exclude))
+                    sourceFiles.Remove(Path.GetFullPath(f));
+            }
+            if (!string.IsNullOrEmpty(remove))
+            {
+                foreach (var f in ResolveWildcards(baseDir, remove))
+                    sourceFiles.Remove(Path.GetFullPath(f));
+            }
+        }
+
+        // Gather dependency references
+        var dependencies = new List<string>();
+        foreach (var pr in doc.Descendants("PackageReference"))
+        {
+            var inc = pr.Attribute("Include")?.Value;
+            if (!string.IsNullOrEmpty(inc)) dependencies.Add(inc);
+        }
+        foreach (var proj in doc.Descendants("ProjectReference"))
+        {
+            var inc = proj.Attribute("Include")?.Value;
+            if (!string.IsNullOrEmpty(inc)) dependencies.Add(Path.GetFileNameWithoutExtension(inc));
+        }
+
+        Console.WriteLine($"  [csproj] gathered {sourceFiles.Count} C# files, dependencies: {string.Join(", ", dependencies)}");
+
+        var sources = sourceFiles.ToList();
+        if (sources.Count == 0) return (null, new[] { "no source matched the SubsystemWin compile set." });
+
+        var overrideMap = overrideTrees?.ToDictionary(t => Path.GetFullPath(t.FilePath), StringComparer.OrdinalIgnoreCase)
+                          ?? new Dictionary<string, SyntaxTree>(StringComparer.OrdinalIgnoreCase);
+
+        var trees = new List<SyntaxTree>();
+        foreach (var p in sources)
+        {
+            var full = Path.GetFullPath(p);
+            if (overrideMap.TryGetValue(full, out var ot))
+            {
+                trees.Add(ot);
+            }
+            else
+            {
+                trees.Add(CSharpSyntaxTree.ParseText(File.ReadAllText(p), path: p));
+            }
+        }
+        // ImplicitUsings=enable: the SDK injects these globals at build; synthesize the same set here.
+        trees.Add(CSharpSyntaxTree.ParseText(
+            "global using System;\n" +
+            "global using System.Collections.Generic;\n" +
+            "global using System.IO;\n" +
+            "global using System.Linq;\n" +
+            "global using System.Net.Http;\n" +
+            "global using System.Threading;\n" +
+            "global using System.Threading.Tasks;\n"));
+
+        var options = new CSharpCompilationOptions(
+            OutputKind.ConsoleApplication,
+            optimizationLevel: OptimizationLevel.Release,
+            allowUnsafe: true,
+            nullableContextOptions: NullableContextOptions.Enable);
+        var compilation = CSharpCompilation.Create(asmName, trees, references, options);
+
+        // Run In-Proc Analyzers Gate during Self-Build (fails compile if un-baselined violations are found)
+        string analyzerDir = Path.Combine(sourceRoot, "src", "analyzers");
+        if (Directory.Exists(analyzerDir))
+        {
+            var analyzerRefs = references.ToList();
+            var (analyzers, loadErrors) = LoadAnalyzersForBuild(sourceRoot, analyzerRefs);
+            if (analyzers.Length > 0)
+            {
+                var analyzerOptions = new AnalyzerOptions(ImmutableArray.Create<AdditionalText>(
+                    new CustomAdditionalText(Path.Combine(sourceRoot, "src", "analyzers", "SystemCatalog.json")),
+                    new CustomAdditionalText(Path.Combine(sourceRoot, "src", "runspace", "windows", "SubsystemWin.csproj"))
+                ));
+                var diags = compilation.WithAnalyzers(analyzers, analyzerOptions)
+                    .GetAnalyzerDiagnosticsAsync().GetAwaiter().GetResult();
+                
+                var ssDiags = diags.Where(d => d.Id.StartsWith("SS", StringComparison.Ordinal)).ToList();
+                if (ssDiags.Count > 0)
+                {
+                    string baselinePath = Path.Combine(analyzerDir, "SS-BASELINE.txt");
+                    var baselineLines = File.Exists(baselinePath) 
+                        ? File.ReadAllLines(baselinePath).Select(l => l.Trim()).Where(l => l.Length > 0).ToHashSet()
+                        : new HashSet<string>();
+                    
+                    var newViolations = new List<string>();
+                    foreach (var d in ssDiags)
+                    {
+                        var lineSpan = d.Location.GetLineSpan();
+                        string file = Path.GetFileName(lineSpan.Path);
+                        string baselineKey = $"{d.Id}|{file}|Global";
+                        if (!baselineLines.Contains(baselineKey))
+                        {
+                            newViolations.Add($"  {d.Id} in {lineSpan.Path}:{lineSpan.StartLinePosition.Line + 1} - {d.GetMessage()}");
+                        }
+                    }
+                    
+                    if (newViolations.Count > 0)
+                    {
+                        var errList = new List<string> { "Static Analyzer Gate Failed (un-baselined violations found):" };
+                        errList.AddRange(newViolations);
+                        return (null, errList.ToArray());
+                    }
+                }
+            }
+        }
+
+        // The three manifest resources the original carries (LogicalName == the name). Pull them from THIS
+        // running assembly so they are always present and exact — no dependency on a dump file being on disk.
+        var resources = new List<ResourceDescription>();
+        foreach (var name in new[] { "SystemCatalog.json", "ss-source.dump", "app.ico", "requests.json", "CONTRACT.md", "COLD-START.md" })
+        {
+            // ss-source.dump is REGENERATED from the tree we are compiling — never copied from our own
+            // resource or read off disk (the on-disk dump is stale by construction). This is the byte that
+            // carries new/edited source into the offspring: without it `ss build self` forwards the parent
+            // tool's dump and the exe diverges from the code it actually compiled. SystemCatalog.json is the
+            // SAME class of truth — a CONTRACT that tracks the compiled tree — so read it from disk too, or a
+            // catalog edit (hostPaths/vocabulary) never reaches the offspring and `ss contextualize`/the
+            // Registrar project a stale contract. app.ico is binary we don't author here: carry ours, fall to disk.
+            byte[]? data =
+                name.Equals("ss-source.dump",     StringComparison.OrdinalIgnoreCase) ? GenerateSourceDump(sourceRoot) :
+                name.Equals("SystemCatalog.json", StringComparison.OrdinalIgnoreCase) ? (DiskResource(sourceRoot, name) ?? SelfResource(name)) :
+                name.Equals("requests.json",      StringComparison.OrdinalIgnoreCase) ? (DiskResource(sourceRoot, name) ?? SelfResource(name)) :
+                // The canon docs track the live doctrine in docs/ (disk wins); SelfResource carries them forward
+                // across a clone rebuild where docs/ is gitignored and absent.
+                name.Equals("CONTRACT.md",        StringComparison.OrdinalIgnoreCase) ? (DiskResource(sourceRoot, name) ?? SelfResource(name)) :
+                name.Equals("COLD-START.md",      StringComparison.OrdinalIgnoreCase) ? (DiskResource(sourceRoot, name) ?? SelfResource(name)) :
+                (SelfResource(name) ?? DiskResource(sourceRoot, name));
+            if (data != null)
+            {
+                var bytes = data;
+                resources.Add(new ResourceDescription(name, () => new MemoryStream(bytes), isPublic: true));
+            }
+        }
+
+        // Embed files from Registry/ folder
+        string registryDir = Path.Combine(sourceRoot, "Registry");
+        if (Directory.Exists(registryDir))
+        {
+            foreach (var file in Directory.EnumerateFiles(registryDir, "*.md", SearchOption.AllDirectories))
+            {
+                var relPath = Path.GetRelativePath(registryDir, file).Replace('\\', '/');
+                var logicalName = "Registry/" + relPath;
+                var bytes = File.ReadAllBytes(file);
+                resources.Add(new ResourceDescription(logicalName, () => new MemoryStream(bytes), isPublic: true));
+            }
+        }
+
+        using var pe = new MemoryStream();
+        var result = compilation.Emit(pe, manifestResources: resources);
+        if (!result.Success)
+            return (null, result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).Select(d => d.ToString()).ToArray());
+
+        var replacements = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            [entryDll] = pe.ToArray()
+        };
+        if (codeContextBytes != null)
+        {
+            replacements["CodeContext.dll"] = codeContextBytes;
+        }
+
+        var newExe = SelfBundle.Write(exe, manifest, replacements);
+        return (newExe, null);
+    }
+
+    // The verb: ss build self [--path <repo>] [--out <file>] [--replace]
+    public static int Run(string[] args)
+    {
+        Console.WriteLine("ss build self — zero-dotnet rebuild (in-proc Roslyn + home-rolled bundle pack).");
+        var root = Build.ResolveSource(Build.PathArg(args));
+        if (root == null) { Console.Error.WriteLine("  [FAIL] source: no repo / embedded source / --path."); return 2; }
+        Console.WriteLine($"  source: {root}");
+
+        bool clearForRelease = Build.HasFlag(args, "--clear-for-release") || Build.HasFlag(args, "-c");
+        if (clearForRelease)
+        {
+            Console.Write("WARNING: --clear-for-release will permanently delete the local requests database. Are you sure? (y/N): ");
+            var r1 = Console.ReadLine();
+            if (r1?.Trim().Equals("y", StringComparison.OrdinalIgnoreCase) != true)
+            {
+                Console.Error.WriteLine("Build aborted by user (clear-for-release gate 1 rejected).");
+                return 3;
+            }
+
+            Console.Write("ARE YOU REALLY, REALLY SURE? All local requests and EOS logs will be wiped! (yes/NO): ");
+            var r2 = Console.ReadLine();
+            if (r2?.Trim().Equals("yes", StringComparison.OrdinalIgnoreCase) != true)
+            {
+                Console.Error.WriteLine("Build aborted by user (clear-for-release gate 2 rejected).");
+                return 3;
+            }
+
+            var dbPath = Path.Combine(root, "subsystem-requests.db");
+            if (File.Exists(dbPath))
+            {
+                try { File.Delete(dbPath); Console.WriteLine($"ss build self: deleted local database for release ({dbPath})"); }
+                catch (Exception ex) { Console.Error.WriteLine($"ss build self: failed to delete database: {ex.Message}"); }
+            }
+            var selfDbPath = Path.Combine(AppContext.BaseDirectory, "subsystem-requests.db");
+            if (File.Exists(selfDbPath))
+            {
+                try { File.Delete(selfDbPath); Console.WriteLine($"ss build self: deleted self database for release ({selfDbPath})"); }
+                catch (Exception ex) { Console.Error.WriteLine($"ss build self: failed to delete self database: {ex.Message}"); }
+            }
+        }
+
+        var (exe, errors) = Compile(root);
+        if (exe == null)
+        {
+            var es = errors ?? Array.Empty<string>();
+            Console.Error.WriteLine($"ss build self: RED — compile failed ({es.Length} errors). First 40:");
+            foreach (var e in es.Take(40)) Console.Error.WriteLine("  " + e);
+            return 1;
+        }
+
+        var drive = Path.GetPathRoot(Environment.ProcessPath ?? root) ?? root;
+        var outPath = ArgValue(args, "--out") ?? Path.Combine(drive, "tmp", "ss-self", "ss.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+        File.WriteAllBytes(outPath, exe);
+        Console.WriteLine($"ss build self: GREEN — wrote {exe.Length / (1024 * 1024):n0} MB -> {outPath}");
+        Console.WriteLine($"  prove the ouroboros:  \"{outPath}\" diag");
+
+        if (Build.HasFlag(args, "--replace"))
+        {
+            var self = Environment.ProcessPath!;
+            var old = self + ".old";
+            try { if (File.Exists(old)) File.Delete(old); File.Move(self, old); File.WriteAllBytes(self, exe); Console.WriteLine($"  + self-replaced {self} (old -> {old})"); }
+            catch (Exception ex) { Console.Error.WriteLine("  ! self-replace failed: " + ex.Message); }
+        }
+        return 0;
+    }
+
+    private static byte[]? SelfResource(string logicalName)
+    {
+        var asm = Assembly.GetExecutingAssembly();
+        var name = asm.GetManifestResourceNames().FirstOrDefault(n => n.EndsWith(logicalName, StringComparison.OrdinalIgnoreCase));
+        if (name == null) return null;
+        using var s = asm.GetManifestResourceStream(name);
+        if (s == null) return null;
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        return ms.ToArray();
+    }
+
+    private static byte[]? DiskResource(string root, string fileName)
+    {
+        var hit = Directory.EnumerateFiles(root, fileName, SearchOption.AllDirectories)
+            .FirstOrDefault(p => !p.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
+                              && !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"));
+        return hit == null ? null : File.ReadAllBytes(hit);
+    }
+
+    // Regenerate the ♦/♠ source dump from <sourceRoot> — a pure-C# port of Get-CodeContext carrying the SAME
+    // scan rules (blocked dirs, whitelisted extensions, 500 KB cap) and the SAME wire format SelfSource.Restore
+    // reads back (a ♦ header + index, then one `♠ <relpath>` block per file). Because this reads the tree we
+    // are about to compile, the offspring carries the EXACT source it was built from — the fix for the
+    // stale-dump gap. Pure C#, no runspace, no dotnet: it belongs in the zero-dep self-build path.
+    private static byte[] GenerateSourceDump(string sourceRoot)
+    {
+        var blockedDirs = new[] { "node_modules", "bin", "obj", "dist", "build", ".git", ".vs", "packages", "vendor", "reference" };
+        var whitelist   = new[] { ".cs", ".ps1", ".js", ".ts", ".html", ".css", ".json", ".csproj", ".xml", ".config", ".props", ".targets", ".sln" };
+        const long maxFileSize = 500L * 1024;
+        var rootFull = Path.GetFullPath(sourceRoot);
+
+        var files = new List<string>();
+        var queue = new Queue<string>();
+        queue.Enqueue(rootFull);
+        while (queue.Count > 0)
+        {
+            var dir = queue.Dequeue();
+            if (blockedDirs.Any(d => new DirectoryInfo(dir).Name.Equals(d, StringComparison.OrdinalIgnoreCase))) continue;
+            try { foreach (var sub in Directory.GetDirectories(dir)) queue.Enqueue(sub); }
+            catch (UnauthorizedAccessException) { continue; }
+            catch (DirectoryNotFoundException) { continue; }
+            try
+            {
+                foreach (var f in Directory.GetFiles(dir))
+                {
+                    if (!whitelist.Contains(Path.GetExtension(f).ToLowerInvariant())) continue;
+                    if (new FileInfo(f).Length > maxFileSize) continue;
+
+                    files.Add(f);
+                }
+            }
+            catch (UnauthorizedAccessException) { continue; }
+            catch (FileNotFoundException) { continue; }
+        }
+
+        // Deterministic order so the dump is byte-stable run-to-run (Restore is order-independent; this is
+        // hygiene — a stable dump means the only churn in the offspring's resource is the header timestamp).
+        files.Sort(StringComparer.OrdinalIgnoreCase);
+
+        var doc = new List<string> { $"♦ repo: {new DirectoryInfo(rootFull).Name} | {DateTime.UtcNow:o}" };
+        var blocks = new List<(string Rel, string[] Lines)>();
+        int startLine = files.Count + 2;   // mirrors Get-CodeContext index bookkeeping (cosmetic; Restore skips the index)
+        foreach (var file in files)
+        {
+            var rel = Path.GetRelativePath(rootFull, file).Replace('\\', '/');
+            string[] lines;
+            try { lines = File.ReadAllLines(file); }
+            catch (Exception ex) { Dg.Error("selfbuild", ex); continue; }
+            if (lines.Length == 0) continue;
+            blocks.Add((rel, lines));
+            doc.Add($"{rel} | {startLine}");
+            startLine += lines.Length + 1;
+        }
+        foreach (var b in blocks)
+        {
+            doc.Add($"♠ {b.Rel}");
+            doc.AddRange(b.Lines);
+        }
+        return new UTF8Encoding(false).GetBytes(string.Join("\n", doc) + "\n");
+    }
+
+    private static List<string> ResolveWildcards(string baseDir, string pattern)
+    {
+        var files = new List<string>();
+        pattern = pattern.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
+        
+        if (pattern.Contains("*"))
+        {
+            if (pattern.Contains("**"))
+            {
+                int doubleStarIdx = pattern.IndexOf("**");
+                string dirPart = Path.GetFullPath(Path.Combine(baseDir, pattern.Substring(0, doubleStarIdx).TrimEnd(Path.DirectorySeparatorChar)));
+                string filePattern = pattern.Substring(doubleStarIdx + 2).TrimStart(Path.DirectorySeparatorChar);
+                int lastSep = filePattern.LastIndexOf(Path.DirectorySeparatorChar);
+                if (lastSep >= 0)
+                {
+                    filePattern = filePattern.Substring(lastSep + 1);
+                }
+                
+                if (Directory.Exists(dirPart))
+                {
+                    try
+                    {
+                        files.AddRange(Directory.GetFiles(dirPart, filePattern, SearchOption.AllDirectories));
+                    }
+                    catch (Exception ex) { Dg.Error("selfbuild", ex); }
+                }
+            }
+            else
+            {
+                string dirPart;
+                string filePattern;
+                int lastSep = pattern.LastIndexOf(Path.DirectorySeparatorChar);
+                if (lastSep >= 0)
+                {
+                    dirPart = Path.GetFullPath(Path.Combine(baseDir, pattern.Substring(0, lastSep)));
+                    filePattern = pattern.Substring(lastSep + 1);
+                }
+                else
+                {
+                    dirPart = baseDir;
+                    filePattern = pattern;
+                }
+                
+                if (Directory.Exists(dirPart))
+                {
+                    try
+                    {
+                        files.AddRange(Directory.GetFiles(dirPart, filePattern, SearchOption.TopDirectoryOnly));
+                    }
+                    catch (Exception ex) { Dg.Error("selfbuild", ex); }
+                }
+            }
+        }
+        else
+        {
+            string full = Path.GetFullPath(Path.Combine(baseDir, pattern));
+            if (File.Exists(full)) files.Add(full);
+        }
+        return files;
+    }
+
+    private static string? ArgValue(string[] args, string name)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+            if (args[i].Equals(name, StringComparison.OrdinalIgnoreCase)) return args[i + 1];
+        return null;
+    }
+
+    private sealed class CustomAdditionalText : AdditionalText
+    {
+        private readonly string _path;
+        public override string Path => _path;
+        public CustomAdditionalText(string path) => _path = path;
+        public override SourceText? GetText(System.Threading.CancellationToken cancellationToken = default) =>
+            File.Exists(_path) ? SourceText.From(File.ReadAllText(_path)) : null;
+    }
+
+    private static (ImmutableArray<DiagnosticAnalyzer> Analyzers, string[]? Errors) LoadAnalyzersForBuild(string root, List<MetadataReference> refs)
+    {
+        var dir = Path.Combine(root, "src", "analyzers");
+        if (!Directory.Exists(dir)) return (ImmutableArray<DiagnosticAnalyzer>.Empty, new[] { "no analyzer source" });
+        var files = Directory.GetFiles(dir, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains("obj") && !f.Contains("bin") && !f.Contains("vendor"))
+            .ToList();
+        
+        var trees = files.Select(p => CSharpSyntaxTree.ParseText(File.ReadAllText(p), path: p)).ToList();
+        var options = new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary,
+            optimizationLevel: OptimizationLevel.Release, nullableContextOptions: NullableContextOptions.Enable);
+        var comp = CSharpCompilation.Create("Subsystem.Analyzers.Build", trees, refs, options);
+        using var pe = new MemoryStream();
+        var emit = comp.Emit(pe);
+        if (!emit.Success)
+            return (ImmutableArray<DiagnosticAnalyzer>.Empty,
+                emit.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).Select(d => d.ToString()).ToArray());
+
+        var asm = Assembly.Load(pe.ToArray());
+        var made = asm.GetTypes()
+            .Where(t => !t.IsAbstract && typeof(DiagnosticAnalyzer).IsAssignableFrom(t))
+            .Select(t => (DiagnosticAnalyzer)Activator.CreateInstance(t)!)
+            .ToImmutableArray();
+        return (made, null);
+    }
+}

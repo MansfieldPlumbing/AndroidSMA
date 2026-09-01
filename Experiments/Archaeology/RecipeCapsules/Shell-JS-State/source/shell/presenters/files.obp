@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base href="/">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Files</title>
+  <link rel="stylesheet" href="/theme.css">
+  <script src="/themes.js"></script>
+  <script src="/shell/presenter.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body, html {
+      margin: 0; padding: 0; width: 100vw; height: 100vh; overflow: hidden;
+      background: var(--bg); color: var(--fg);
+      font-family: var(--font-sans); user-select: none; font-size: 14px;
+    }
+    .app { display: flex; flex-direction: column; height: 100%; width: 100%; background: var(--surface); }
+    
+    .toolbar {
+      display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+    }
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 6px 12px; background: rgba(127,127,127,.15); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+      font-size: 13px; font-weight: 500; transition: all .15s; outline: none;
+    }
+    .btn:hover { background: rgba(127,127,127,.25); border-color: var(--accent); }
+    .btn:active { transform: scale(.97); }
+    
+    .path-bar {
+      flex: 1; display: flex; align-items: center; gap: 4px; padding: 4px 8px;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+      overflow-x: auto; font-family: var(--font-mono); font-size: 12px;
+    }
+    .path-input {
+      flex: 1; background: transparent; border: none; color: var(--fg);
+      font-family: var(--font-mono); font-size: 13px; outline: none;
+    }
+
+    .file-list-container { flex: 1; overflow-y: auto; padding: 8px; }
+    
+    .file-table { width: 100%; border-collapse: collapse; text-align: left; }
+    .file-table th {
+      padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--muted);
+      border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface);
+    }
+    .file-row {
+      cursor: pointer; transition: background .12s; border-radius: 4px;
+    }
+    .file-row:hover { background: rgba(127,127,127,.15); }
+    .file-row td { padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,.04); }
+    
+    .file-icon { font-size: 16px; margin-right: 8px; display: inline-block; vertical-align: middle; font-family: var(--font-mono); }
+    .file-name { font-weight: 500; display: inline-block; vertical-align: middle; }
+    .file-size { color: var(--muted); font-size: 12px; font-family: var(--font-mono); }
+    .file-date { color: var(--muted); font-size: 12px; }
+    
+    .empty-msg { padding: 32px; text-align: center; color: var(--muted); font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="toolbar">
+      <button class="btn" id="btn-up" title="Parent Directory">⬆ Up</button>
+      <button class="btn" id="btn-refresh" title="Refresh">🔄 Refresh</button>
+      <div class="path-bar">
+        <input type="text" class="path-input" id="path-input" placeholder="Path..." />
+      </div>
+    </div>
+    
+    <div class="file-list-container">
+      <table class="file-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th style="width: 100px;">Size</th>
+            <th style="width: 160px;">Modified</th>
+          </tr>
+        </thead>
+        <tbody id="file-tbody">
+          <!-- Rows dynamically generated -->
+        </tbody>
+      </table>
+      <div class="empty-msg" id="empty-msg" style="display: none;">Directory is empty</div>
+    </div>
+  </div>
+
+  <script>
+    let currentPath = '';
+
+    window.addEventListener('load', () => {
+      loadDirectory('');
+
+      document.getElementById('btn-up').addEventListener('click', () => {
+        if (!currentPath || currentPath === '\\' || currentPath === '/') return;
+        const parts = currentPath.replace(/\\/g, '/').split('/').filter(Boolean);
+        parts.pop();
+        const parentPath = parts.length > 0 ? parts.join('/') : '';
+        loadDirectory(parentPath);
+      });
+
+      document.getElementById('btn-refresh').addEventListener('click', () => {
+        loadDirectory(currentPath);
+      });
+
+      document.getElementById('path-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          loadDirectory(e.target.value);
+        }
+      });
+    });
+
+    async function loadDirectory(path) {
+      const tbody = document.getElementById('file-tbody');
+      const emptyMsg = document.getElementById('empty-msg');
+      const pathInput = document.getElementById('path-input');
+
+      tbody.innerHTML = '';
+      emptyMsg.style.display = 'none';
+
+      try {
+        let items = [];
+        if (window.parent && window.parent.SubsystemApi) {
+          items = await window.parent.SubsystemApi.listDir(path);
+        } else {
+          // Mock data if loaded outside shell
+          items = [
+            { name: 'src', isDir: true, path: 'src', modified: Date.now() },
+            { name: 'README.md', isDir: false, size: 1024, path: 'README.md', modified: Date.now() }
+          ];
+        }
+
+        currentPath = path;
+        pathInput.value = path || '\\';
+
+        if (!items || items.length === 0) {
+          emptyMsg.style.display = 'block';
+          return;
+        }
+
+        // Sort: directories first, then files alphabetically
+        items.sort((a, b) => {
+          if (a.isDir && !b.isDir) return -1;
+          if (!a.isDir && b.isDir) return 1;
+          return a.name.localeCompare(b.name);
+        });
+
+        renderRows(items);
+      } catch (err) {
+        console.error('Failed to load directory:', err);
+        emptyMsg.textContent = 'Error loading directory: ' + err.message;
+        emptyMsg.style.display = 'block';
+      }
+    }
+
+    function renderRows(items) {
+      const tbody = document.getElementById('file-tbody');
+
+      items.forEach(item => {
+        const tr = document.createElement('tr');
+        tr.className = 'file-row';
+        
+        const icon = item.isDir ? '' : getFileIcon(item.name);
+        const sizeStr = item.isDir ? '--' : formatSize(item.size);
+        const dateStr = item.modified ? new Date(item.modified).toLocaleDateString() + ' ' + new Date(item.modified).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '';
+
+        tr.innerHTML = `
+          <td>
+            <span class="file-icon">${icon}</span>
+            <span class="file-name">${escapeHtml(item.name)}</span>
+          </td>
+          <td class="file-size">${sizeStr}</td>
+          <td class="file-date">${dateStr}</td>
+        `;
+
+        tr.addEventListener('dblclick', () => onItemClick(item));
+        tbody.appendChild(tr);
+      });
+    }
+
+    function onItemClick(item) {
+      if (item.isDir) {
+        loadDirectory(item.path);
+      } else {
+        try {
+          if (window.parent && window.parent.postMessage) {
+            window.parent.postMessage({ type: 'shell-open', id: 'edit', params: { file: item.path } }, '*');
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }
+    }
+
+    function getFileIcon(name) {
+      const ext = name.split('.').pop().toLowerCase();
+      if (['cs', 'js', 'ts', 'ps1', 'py', 'json', 'xml', 'html', 'css'].includes(ext)) return '󰏫';
+      if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico'].includes(ext)) return '󰋩';
+      if (['mp3', 'wav', 'ogg', 'flac'].includes(ext)) return '󰕾';
+      if (['mp4', 'mkv', 'webm', 'avi'].includes(ext)) return '󰿎';
+      if (['zip', '7z', 'tar', 'gz'].includes(ext)) return '󰀼';
+      if (['pdf', 'doc', 'docx', 'txt', 'md'].includes(ext)) return '󰈙';
+      return '󰈙';
+    }
+
+    function formatSize(bytes) {
+      if (bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    document.getElementById('btn-up').addEventListener('click', () => {
+      if (!currentPath) return;
+      const parts = currentPath.split(/[\/\\]/).filter(Boolean);
+      if (parts.length > 1) {
+        parts.pop();
+        const parentPath = currentPath.startsWith('/') ? '/' + parts.join('/') : parts.join('\\');
+        loadDirectory(parentPath);
+      }
+    });
+
+    document.getElementById('btn-refresh').addEventListener('click', () => loadDirectory(currentPath));
+
+    document.getElementById('path-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') loadDirectory(e.target.value);
+    });
+
+    // Boot
+    loadDirectory('');
+  </script>
+</body>
+</html>
