@@ -7,6 +7,12 @@ Status: implementation plan; no source-removal authority
 Make `src/Boot/Recovery.ps1` the canonical, human-maintained definition of the
 AndroidSMA entry activity and recovery experience.
 
+`Foreground.ps1` will be the separate canonical definition of the Android
+foreground service that owns durable runtime liveness and integrations. The
+Activity owns recovery and touch projection; the Service owns foreground
+lifecycle. Neither script is permission to merge those responsibilities or
+import an older application's architecture.
+
 `Build-AndroidSMA.ps1` must validate and lower that PS1 into a persistent
 managed assembly that Android can instantiate. The APK must not contain
 `Recovery.ps1` as source, an embedded script string, generated C#, Roslyn, or a
@@ -155,10 +161,18 @@ Proposed command surface:
 ```powershell
 .\Build-AndroidSMA.ps1 -Architecture Arm64
 .\Build-AndroidSMA.ps1 -Architecture Arm32
+.\Build-AndroidSMA.ps1 -Architecture Arm64 -ValidateOnly
+.\Build-AndroidSMA.ps1 -Architecture Arm32 -WhatIf
 ```
 
 Optional switches may select configuration, output root, or validation-only
 mode. They must not change product semantics.
+
+`-ValidateOnly` executes every read-only check: SDK and pack resolution, AST
+validation, native-tool discovery, assembly-policy validation, and dependency
+closure. `-WhatIf` performs those checks and describes every proposed write,
+emission, packaging operation, install, or device action. Neither is a fake
+success path; both report unresolved prerequisites precisely.
 
 The build performs these stages in order:
 
@@ -234,6 +248,14 @@ retry. Prove process death/recreation and failed imports do not corrupt files.
 
 Lower the SMA boundary, create a fresh application runspace, publish Android
 objects, execute file-backed `PROFILE.PS1`, and preserve ErrorRecord details.
+
+### Gate 5A: foreground service
+
+Lower `Foreground.ps1` into an emitted Android `Service` type. Use the public
+managed Android service and notification APIs to prove start, foreground
+notification, retained SMA ownership, Activity reconnect, clean stop, process
+recreation, and integration admission. Do not recover private service-manager
+or Binder protocols from prior work.
 
 ### Gate 6: both architectures
 
