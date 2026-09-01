@@ -1,7 +1,7 @@
 # Build outputs
 bin/
 obj/
-build/
+/build/
 
 # Local SDK / tooling state
 .dotnet/
