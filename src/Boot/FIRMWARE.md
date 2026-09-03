@@ -97,7 +97,8 @@ produce a fresh assembly inventory and receipt.
 
 - `Recovery.ps1` is in `src/Boot` and has passed missing-profile, syntax-error,
   runtime-error, private-home, and successful profile-handoff tests on the
-  physical ARM32 Google TV target.
+  physical ARM32 Google TV and ARM64 Galaxy S23 targets without
+  architecture-specific source edits.
 - `Build-AndroidSMA.ps1` is the build entrance and currently labels its output
   `BridgeProof` honestly.
 - `MainActivity.cs`, `AndroidSMA.csproj`, and the packaged Recovery source are

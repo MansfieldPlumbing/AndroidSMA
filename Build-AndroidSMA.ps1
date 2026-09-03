@@ -105,7 +105,10 @@ foreach ($temporary in @($bridgeProject, $bridgeSource)) {
 }
 
 if ($PSCmdlet.ShouldProcess($native, "Rebuild verified $Architecture native shim")) {
-    & $nativeBuilder -Architecture $Architecture | Out-Null
+    $pwsh = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    & $pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File $nativeBuilder -Architecture $Architecture | Out-Null
+    if ($LASTEXITCODE) { throw "Native shim build failed with exit code $LASTEXITCODE" }
 }
 
 if (-not $PSCmdlet.ShouldProcess($ApplicationId, "Build $Variant bridge-proof APK for $Architecture")) {

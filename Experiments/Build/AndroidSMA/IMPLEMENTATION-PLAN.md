@@ -264,9 +264,10 @@ Run `Recovery.ps1` behind the existing Activity and prove every recovery and
 private-home behavior. Correct the PS1 while `MainActivity.cs` remains available
 for direct comparison.
 
-Status: passed on the physical ARM32 Google TV target for missing profile,
-syntax diagnostics, runtime diagnostics, private-home navigation, and valid
-profile handoff. Import interruption and process-recreation cases remain.
+Status: passed on the physical ARM32 Google TV and ARM64 Galaxy S23 targets for
+missing profile, syntax diagnostics, runtime diagnostics, private-home
+navigation, and valid profile handoff using the same Recovery source. Import
+interruption and process-recreation cases remain. See `DEVICE-PARITY.md`.
 
 ### Gate 2: emitter kernel
 
