@@ -1,5 +1,6 @@
 #requires -Version 7.0
 using namespace System
+using namespace System.Collections.Generic
 using namespace System.IO
 using namespace System.Management.Automation
 using namespace System.Management.Automation.Runspaces
@@ -25,7 +26,7 @@ function Get-PrivateRoot {
 }
 
 function Get-ProfilePath {
-    Join-Path (Get-PrivateRoot) 'PROFILE.PS1'
+    [Path]::Combine((Get-PrivateRoot), 'PROFILE.PS1')
 }
 
 function ConvertTo-ErrorRecordText([ErrorRecord] $Record) {
@@ -52,33 +53,13 @@ function ConvertTo-ErrorRecordText([ErrorRecord] $Record) {
     ) -join "`n"
 }
 
-function ConvertTo-FailureText {
-    param(
-        [Parameter(Mandatory)] $Failure,
-        [ErrorRecord[]] $ErrorRecords
-    )
-
-    $profilePath = Get-ProfilePath
-    $failureText = if ($ErrorRecords.Count) {
-        ($ErrorRecords | ForEach-Object { ConvertTo-ErrorRecordText $_ }) -join "`n`n"
-    } elseif ($Failure -is [ErrorRecord]) {
-        ConvertTo-ErrorRecordText $Failure
-    } else {
-        @(
-            'message: ' + (ConvertTo-OneLine $Failure.Message)
-            'exception: ' + $Failure.GetType().FullName
-            'source: ' + $profilePath
-            'line: —'
-            'column: —'
-        ) -join "`n"
-    }
-
+function Add-RecoveryContext([string] $FailureText) {
     $runspaceId = if ($script:ApplicationRunspace) {
         $script:ApplicationRunspace.InstanceId
     } else { '—' }
     $abis = [Android.OS.Build]::SupportedAbis
 
-    $failureText + "`n`n" + (@(
+    $FailureText + "`n`n" + (@(
         'timestamp: ' + [DateTimeOffset]::UtcNow.ToString('O')
         'pid: ' + [Environment]::ProcessId
         'tid: ' + [Android.OS.Process]::MyTid()
@@ -92,6 +73,65 @@ function ConvertTo-FailureText {
     ) -join "`n")
 }
 
+function ConvertTo-ParseFailureText([System.Management.Automation.Language.ParseError[]] $ParseErrors) {
+    $profilePath = Get-ProfilePath
+    $sourceLines = [File]::ReadAllLines($profilePath)
+    $items = [List[string]]::new()
+
+    foreach ($parseError in $ParseErrors) {
+        $line = $parseError.Extent.StartLineNumber
+        $column = $parseError.Extent.StartColumnNumber
+        $sourceText = if ($line -gt 0 -and $line -le $sourceLines.Length) {
+            $sourceLines[$line - 1]
+        } else { $parseError.Extent.Text }
+
+        $items.Add((@(
+            'message: ' + (ConvertTo-OneLine $parseError.Message)
+            'exception: System.Management.Automation.ParseException'
+            'fullyQualifiedErrorId: ' + (ConvertTo-OneLine $parseError.ErrorId)
+            'category: ParserError'
+            'categoryReason: ParseException'
+            'targetName: ' + $profilePath
+            'targetType: System.String'
+            'source: ' + $profilePath
+            'line: ' + $line
+            'column: ' + $column
+            'sourceText: ' + (ConvertTo-OneLine $sourceText)
+            'scriptStackTrace: —'
+        ) -join "`n"))
+    }
+
+    Add-RecoveryContext ($items -join "`n`n")
+}
+
+function ConvertTo-FailureText {
+    param(
+        [Parameter(Mandatory)] $Failure,
+        [ErrorRecord[]] $ErrorRecords
+    )
+
+    $profilePath = Get-ProfilePath
+    $failureText = if ($ErrorRecords.Count) {
+        $recordText = [List[string]]::new()
+        foreach ($record in $ErrorRecords) {
+            $recordText.Add((ConvertTo-ErrorRecordText $record))
+        }
+        $recordText -join "`n`n"
+    } elseif ($Failure -is [ErrorRecord]) {
+        ConvertTo-ErrorRecordText $Failure
+    } else {
+        @(
+            'message: ' + (ConvertTo-OneLine $Failure.Message)
+            'exception: ' + $Failure.GetType().FullName
+            'source: ' + $profilePath
+            'line: —'
+            'column: —'
+        ) -join "`n"
+    }
+
+    Add-RecoveryContext $failureText
+}
+
 function Copy-RecoveryText([string] $Label, [string] $Text) {
     $clipboard = $script:Activity.GetSystemService([Android.Content.Context]::ClipboardService)
     $clipboard.PrimaryClip = [Android.Content.ClipData]::NewPlainText($Label, $Text)
@@ -99,11 +139,11 @@ function Copy-RecoveryText([string] $Label, [string] $Text) {
 
 function Get-FailureClipboardPayload([string] $Details) {
     $profile = Get-ProfilePath
-    if (-not (Test-Path -LiteralPath $profile -PathType Leaf)) {
+    if (-not [File]::Exists($profile)) {
         return "ANDROIDSMA STARTUP FAILURE`n`n$Details`n`nPROFILE.PS1: unavailable"
     }
 
-    $text = Get-Content -LiteralPath $profile -Raw
+    $text = [File]::ReadAllText($profile)
     "ANDROIDSMA STARTUP FAILURE`n`n$Details" +
         "`n`n--- PROFILE.PS1 BEGIN ---`n`n$text" +
         "`n`n--- PROFILE.PS1 END ---"
@@ -186,7 +226,8 @@ $Details
         $dialog = [Android.App.AlertDialog+Builder]::new($script:Activity)
         $dialog.SetTitle('HELP')
         $dialog.SetMessage($helpText)
-        $dialog.SetNeutralButton('COPY TO CLIPBOARD', { Copy-RecoveryText 'AndroidSMA help' $helpText })
+        $copyHelp = { Copy-RecoveryText 'AndroidSMA help' $helpText }.GetNewClosure()
+        $dialog.SetNeutralButton('COPY TO CLIPBOARD', $copyHelp)
         $dialog.SetPositiveButton('OK', {})
         $dialog.Show()
     }
@@ -212,10 +253,12 @@ function Show-PrivateFile($Item) {
         'modified: ' + $Item.LastWriteTimeUtc.ToString('O')
     ) -join "`n"
 
+    $filePath = $Item.FullName
     $dialog = [Android.App.AlertDialog+Builder]::new($script:Activity)
     $dialog.SetTitle($Item.Name)
     $dialog.SetMessage($details)
-    $dialog.SetNeutralButton('COPY PATH', { Copy-RecoveryText 'AndroidSMA private path' $Item.FullName })
+    $copyPath = { Copy-RecoveryText 'AndroidSMA private path' $filePath }.GetNewClosure()
+    $dialog.SetNeutralButton('COPY PATH', $copyPath)
     $dialog.SetPositiveButton('OK', {})
     $dialog.Show()
 }
@@ -252,11 +295,21 @@ function Show-PrivateHome([string] $Path) {
 
     if ($current -ne $root) {
         $parent = [Directory]::GetParent($current).FullName
-        Add-RecoveryButton $rows '[..]  PARENT' { Show-PrivateHome $parent }
+        $openParent = { Show-PrivateHome $parent }.GetNewClosure()
+        Add-RecoveryButton $rows '[..]  PARENT' $openParent
     }
 
-    $items = @(Get-ChildItem -LiteralPath $current -Force |
-        Sort-Object @{ Expression = { -not $_.PSIsContainer } }, Name)
+    $items = [List[FileSystemInfo]]::new([DirectoryInfo]::new($current).GetFileSystemInfos())
+    $items.Sort([Comparison[FileSystemInfo]] {
+        param($left, $right)
+        $leftDirectory = $left -is [DirectoryInfo]
+        $rightDirectory = $right -is [DirectoryInfo]
+        if ($leftDirectory -ne $rightDirectory) {
+            if ($leftDirectory) { return -1 }
+            return 1
+        }
+        [string]::Compare($left.Name, $right.Name, [StringComparison]::OrdinalIgnoreCase)
+    })
     if ($items.Count -eq 0) {
         $empty = [Android.Widget.TextView]::new($script:Activity)
         $empty.Text = '(empty)'
@@ -267,12 +320,14 @@ function Show-PrivateHome([string] $Path) {
 
     foreach ($item in $items) {
         $selected = $item
-        if ($selected.PSIsContainer) {
-            Add-RecoveryButton $rows ('[DIR]  ' + $selected.Name) { Show-PrivateHome $selected.FullName }
+        if ($selected -is [DirectoryInfo]) {
+            $directoryPath = $selected.FullName
+            $openDirectory = { Show-PrivateHome $directoryPath }.GetNewClosure()
+            Add-RecoveryButton $rows ('[DIR]  ' + $selected.Name) $openDirectory
         } else {
-            Add-RecoveryButton $rows ('[FILE] ' + $selected.Name + '  (' + $selected.Length + ')') {
-                Show-PrivateFile $selected
-            }
+            $file = $selected
+            $openFile = { Show-PrivateFile $file }.GetNewClosure()
+            Add-RecoveryButton $rows ('[FILE] ' + $selected.Name + '  (' + $selected.Length + ')') $openFile
         }
     }
 
@@ -325,7 +380,7 @@ function Import-Document($Uri) {
         $name = 'PROFILE.PS1'
     }
 
-    $destination = Join-Path (Get-PrivateRoot) $name
+    $destination = [Path]::Combine((Get-PrivateRoot), $name)
     $incoming = "$destination.incoming"
     try {
         $source = $script:Activity.ContentResolver.OpenInputStream($Uri)
@@ -340,10 +395,10 @@ function Import-Document($Uri) {
             } finally { $target.Dispose() }
         } finally { $source.Dispose() }
 
-        Move-Item -LiteralPath $incoming -Destination $destination -Force
+        [File]::Move($incoming, $destination, $true)
         [Android.Util.Log]::Info('AndroidSMA', "IMPORTED $name")
     } catch {
-        Remove-Item -LiteralPath $incoming -Force -ErrorAction SilentlyContinue
+        if ([File]::Exists($incoming)) { [File]::Delete($incoming) }
         throw
     }
 
@@ -351,10 +406,30 @@ function Import-Document($Uri) {
 }
 
 function Stop-AndroidSmaApplication {
-    [Runspace]::DefaultRunspace = $null
     if ($script:ApplicationRunspace) {
         $script:ApplicationRunspace.Dispose()
         $script:ApplicationRunspace = $null
+    }
+    [Runspace]::DefaultRunspace = $script:BootRunspace
+}
+
+function Add-AndroidSmaCommands($InitialSessionState, [Reflection.Assembly] $Assembly) {
+    foreach ($type in $Assembly.GetTypes()) {
+        $cmdlets = $type.GetCustomAttributes([CmdletAttribute], $false)
+        if ($cmdlets.Count) {
+            $cmdlet = $cmdlets[0]
+            $InitialSessionState.Commands.Add(
+                [SessionStateCmdletEntry]::new(
+                    "$($cmdlet.VerbName)-$($cmdlet.NounName)", $type, $null))
+        }
+
+        $providers = $type.GetCustomAttributes(
+            [System.Management.Automation.Provider.CmdletProviderAttribute], $false)
+        if ($providers.Count) {
+            $provider = $providers[0]
+            $InitialSessionState.Providers.Add(
+                [SessionStateProviderEntry]::new($provider.ProviderName, $type, $null))
+        }
     }
 }
 
@@ -364,6 +439,9 @@ function New-AndroidSmaApplicationRunspace {
     $initial = [InitialSessionState]::CreateDefault2()
     $initial.LanguageMode = [PSLanguageMode]::FullLanguage
     $initial.ThreadOptions = [PSThreadOptions]::UseCurrentThread
+    Add-AndroidSmaCommands $initial ([PSObject].Assembly)
+    Add-AndroidSmaCommands $initial ([Reflection.Assembly]::Load('Microsoft.PowerShell.Commands.Utility'))
+    Add-AndroidSmaCommands $initial ([Reflection.Assembly]::Load('Microsoft.PowerShell.Commands.Management'))
     $runspace = [RunspaceFactory]::CreateRunspace($initial)
     $runspace.Open()
     $runspace
@@ -371,31 +449,59 @@ function New-AndroidSmaApplicationRunspace {
 
 function Start-AndroidSmaApplication {
     $profile = Get-ProfilePath
-    if (-not (Test-Path -LiteralPath $profile -PathType Leaf)) {
+    if (-not [File]::Exists($profile)) {
         $missing = [FileNotFoundException]::new('PROFILE.PS1 is missing.', $profile)
         Show-Recovery ':(' (ConvertTo-FailureText $missing)
         return
     }
 
+    $tokens = $null
+    $parseErrors = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile(
+        $profile, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count) {
+        $details = ConvertTo-ParseFailureText $parseErrors
+        [Android.Util.Log]::Error('AndroidSMA', "PROFILE_PARSE_FAILED $details")
+        Show-Recovery ':(' $details
+        return
+    }
+
     try {
         $script:ApplicationRunspace = New-AndroidSmaApplicationRunspace
-        [Runspace]::DefaultRunspace = $script:ApplicationRunspace
         $script:ApplicationRunspace.SessionStateProxy.SetVariable('Activity', $script:Activity)
-        $script:ApplicationRunspace.SessionStateProxy.SetVariable('PSScriptRoot', (Get-PrivateRoot))
 
         $shell = [PowerShell]::Create()
+        $records = @()
         try {
             $shell.Runspace = $script:ApplicationRunspace
-            $null = $shell.AddScript((Get-Content -LiteralPath $profile -Raw), $false).Invoke()
+            [Runspace]::DefaultRunspace = $script:ApplicationRunspace
+            $null = $shell.AddCommand($profile).Invoke()
+            $records = [ErrorRecord[]]$shell.Streams.Error
             if ($shell.HadErrors) {
-                $records = [ErrorRecord[]]$shell.Streams.Error
                 throw [RuntimeException]::new('PROFILE.PS1 reported one or more errors.')
             }
-        } finally { $shell.Dispose() }
+        } catch {
+            $records = [ErrorRecord[]]$shell.Streams.Error
+            if (-not $records.Count) {
+                $exception = $_.Exception
+                while ($exception) {
+                    $record = $exception.ErrorRecord
+                    if ($record -and
+                        -not [string]::IsNullOrWhiteSpace($record.InvocationInfo.ScriptName)) {
+                        $records = [ErrorRecord[]]@($record)
+                        break
+                    }
+                    $exception = $exception.InnerException
+                }
+            }
+            throw
+        } finally {
+            [Runspace]::DefaultRunspace = $script:BootRunspace
+            $shell.Dispose()
+        }
 
         [Android.Util.Log]::Info('AndroidSMA', "PROFILE_OK runspace=$($script:ApplicationRunspace.InstanceId)")
     } catch {
-        $records = if ($shell) { [ErrorRecord[]]$shell.Streams.Error } else { @() }
         $details = ConvertTo-FailureText $_.Exception $records
         Stop-AndroidSmaApplication
         [Android.Util.Log]::Error('AndroidSMA', "PROFILE_FAILED $details")
@@ -429,6 +535,7 @@ function Receive-ActivityResult($ResultEvent) {
 switch ($Event.Kind) {
     'Create' {
         $script:Activity = $Event.Activity
+        $script:BootRunspace = [Runspace]::DefaultRunspace
         Start-AndroidSmaApplication
     }
     'ActivityResult' {

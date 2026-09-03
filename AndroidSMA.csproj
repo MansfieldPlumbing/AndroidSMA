@@ -20,7 +20,14 @@
       <ExcludeAssets>native</ExcludeAssets>
     </PackageReference>
     <AndroidNativeLibrary Include="native\arm64-v8a\libpsl-native.so"
-                          Link="arm64-v8a\libpsl-native.so" />
+                          Link="arm64-v8a\libpsl-native.so"
+                          Condition="'$(RuntimeIdentifier)' == 'android-arm64'" />
+    <AndroidNativeLibrary Include="native\armeabi-v7a\libpsl-native.so"
+                          Link="armeabi-v7a\libpsl-native.so"
+                          Condition="'$(RuntimeIdentifier)' == 'android-arm'" />
+    <AndroidResource Include="src\Android\Resources\**\*"
+                     Link="Resources\%(RecursiveDir)%(Filename)%(Extension)" />
+    <AndroidAsset Include="src\Boot\Recovery.ps1" Link="Recovery.ps1" />
   </ItemGroup>
   <ItemGroup>
     <!--

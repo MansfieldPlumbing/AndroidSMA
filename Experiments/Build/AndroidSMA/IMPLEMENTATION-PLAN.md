@@ -32,14 +32,18 @@ a fork of recovery behavior.
 
 ## Current truth
 
-- `MainActivity.cs` is the deployed behavior oracle and temporary fallback.
-- `src/Boot/Recovery.ps1` is a substantial PS1 parity draft, not yet a proven
-  compiler input.
+- `src/Boot/Recovery.ps1` is the application firmware and canonical behavior
+  source. On 2026-09-02 it passed the missing-profile, parser-failure,
+  runtime-failure, private-home, and successful file-backed profile gates on
+  the ARM32 Google TV target.
+- `MainActivity.cs` is now only the temporary Android-to-firmware bridge. It is
+  not a behavior oracle and has no authority to regain application policy.
 - The deployed application already runs SMA and PS1 and exposes its Activity to
   PowerShell.
 - The ARM64 native shim is present and has a reproducibility receipt.
-- ARM32 worked previously with .NET 11 Preview 7, but this checkout does not
-  presently contain its native shim or a complete reproducible SDK bootstrap.
+- The ignored `.dotnet-p7` SDK/workload installation reproduces the pinned
+  Preview 7 ARM32 CoreCLR build. The checked-in ARM32 native shim reproduces
+  the recorded hash.
 - Android packaging still requires MSBuild project information. Eliminating the
   retained `.csproj` means generating disposable packaging input under
   `build/<architecture>/`, not pretending the Android packager has no contract.
@@ -63,6 +67,38 @@ that surface.
   returned an array containing a broken object.
 
 The build experiment must not turn platform archaeology into product source.
+
+## Vocabulary boundary
+
+AndroidSMA begins with an empty authored vocabulary and admits each word on
+purpose. Runspaces may reuse the same admitted PS1 commands and behavioral
+contracts, but they do not acquire implicit shared state, automatic imports, or
+an inherited application namespace.
+
+DirectPort is the lingua franca for concepts that genuinely survive across
+substrates. It begins with no predeclared graphics or platform glossary. A
+concept and its name enter that vocabulary only after their semantics remain
+honest on more than one substrate. Similar spelling is not sufficient evidence,
+and a convenient native noun is not automatically ours to generalize.
+
+Platform namespaces and terms remain at the narrow membrane where PS1 touches
+their assemblies or tools. For example, an Android `Surface` remains an Android
+object unless a separately named DirectPort concept earns a proven contract
+across substrates. Android, CoreCLR, SMA, Java, JNI, DirectX, D2D,
+AHardwareBuffer, HLSL, XML, JavaScript, and TypeScript names do not become the
+project's architecture merely because an implementation uses them. Meaningful
+platform differences must not be hidden behind false equivalence.
+
+The reusable contract is the command vocabulary, accepted and returned object
+shape, ownership rule, and observable behavior. The exact implementation may
+differ by platform or architecture. In-process objects cross a runspace
+boundary only through an explicit, ownership-safe handoff; objects that cannot
+cross remain at home behind deliberate handles.
+
+Lowering may require private generated CLR type names and dependencies retain
+their own namespaces. Those are implementation coordinates, not public
+vocabulary. Filesystem layout does not manufacture namespaces, and generated
+type names must not leak into `Get-Command`, normal output, or durable scripts.
 
 ## Meaning of "compile Recovery.ps1"
 
@@ -227,6 +263,10 @@ the build must not substitute Mono, NativeAOT, another ABI, or another SDK.
 Run `Recovery.ps1` behind the existing Activity and prove every recovery and
 private-home behavior. Correct the PS1 while `MainActivity.cs` remains available
 for direct comparison.
+
+Status: passed on the physical ARM32 Google TV target for missing profile,
+syntax diagnostics, runtime diagnostics, private-home navigation, and valid
+profile handoff. Import interruption and process-recreation cases remain.
 
 ### Gate 2: emitter kernel
 

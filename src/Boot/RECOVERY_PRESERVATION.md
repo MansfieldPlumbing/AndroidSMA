@@ -2,7 +2,7 @@
 
 Date: 2026-08-31
 
-Source of truth: `C:\dev\AndroidSMA-main\MainActivity.cs` (340 lines)
+Source of truth: `C:\dev\AndroidSMA-main\src\Boot\Recovery.ps1`
 
 This document freezes the behavior that must survive removing application policy from `MainActivity.cs`. It is a preservation contract, not a redesign.
 
@@ -84,7 +84,12 @@ Receive document result
   -> Restart-AndroidSmaApplication when it is PROFILE.PS1
 ```
 
-PowerShell owns filesystem discovery and housekeeping through commands such as `Test-Path`, `Get-Item`, `Get-ChildItem`, `Get-Content -Raw`, `Move-Item`, and `Remove-Item`. Direct Android types appear only where Android is the actual capability: Activity, Intent, ContentResolver, clipboard, dialogs, and views.
+The firmware owns filesystem discovery and housekeeping through the BCL types
+already required by CoreCLR (`System.IO.File`, `DirectoryInfo`, and `Path`). It
+does not load optional command assemblies merely to recover. The disposable
+application runspace may admit command implementations separately. Direct
+Android types appear only where Android is the actual capability: Activity,
+Intent, ContentResolver, clipboard, dialogs, and views.
 
 ## The tiny entry artifact that remains
 

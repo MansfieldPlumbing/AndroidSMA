@@ -1,20 +1,34 @@
 param(
-    [string]$NdkRoot = 'N:\bin\ndk'
+    [ValidateSet('Arm64', 'Arm32')]
+    [string] $Architecture = 'Arm64',
+    [string] $NdkRoot = 'N:\bin\ndk'
 )
 
 $ErrorActionPreference = 'Stop'
 
-$ExpectedSha256 =
-    '4605293D2EAD6D06CF39C45534C5928B8F40DB3AB2A80B415F7FE36C56961A32'
+$target = if ($Architecture -eq 'Arm32') {
+    @{
+        Abi = 'armeabi-v7a'
+        Compiler = 'armv7a-linux-androideabi34-clang.cmd'
+        ExpectedSha256 = '523B1455849710A279CCCCC3A02ABB8138050A9F09580C5E2A1E514ED78E85AD'
+    }
+} else {
+    @{
+        Abi = 'arm64-v8a'
+        Compiler = 'aarch64-linux-android34-clang.cmd'
+        ExpectedSha256 = '4605293D2EAD6D06CF39C45534C5928B8F40DB3AB2A80B415F7FE36C56961A32'
+    }
+}
 
-$Clang = Join-Path $NdkRoot `
-    'toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android34-clang.cmd'
+$ExpectedSha256 = $target.ExpectedSha256
+$Clang = Join-Path $NdkRoot (
+    'toolchains\llvm\prebuilt\windows-x86_64\bin\' + $target.Compiler)
 
 $Source = Join-Path $PSScriptRoot 'libc.null.c'
 $NativeRoot = Split-Path $PSScriptRoot -Parent
-$OutputDir = Join-Path $NativeRoot 'arm64-v8a'
+$OutputDir = Join-Path $NativeRoot $target.Abi
 $Output = Join-Path $OutputDir 'libpsl-native.so'
-$Candidate = Join-Path $env:TEMP 'libpsl-native.rebuild.so'
+$Candidate = Join-Path $env:TEMP ('libpsl-native.' + $target.Abi + '.rebuild.so')
 
 if (-not (Test-Path $Clang)) {
     throw "Android clang not found: $Clang"
@@ -54,6 +68,8 @@ $Item = Get-Item $Output
 
 [pscustomobject]@{
     Status = 'PASS'
+    Architecture = $Architecture
+    Abi = $target.Abi
     Length = $Item.Length
     SHA256 = $Actual
     Output = $Output
