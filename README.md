@@ -11,9 +11,11 @@ MainActivity
     -> PowerShell owns everything after admission
 ```
 
-The compiled host is one C# file. There is no foreground service, C# work
-queue, seeded application, Binder bridge, QNN bridge, or compiled UI policy
-after a profile starts successfully.
+The compiled host is authored in PowerShell as typed CLR expression graphs and
+persisted as `AndroidSMA.dll`. There is no authored C#, maintained `.csproj`,
+foreground service, C# work queue, seeded application, Binder bridge, or QNN
+bridge. The Android packaging project is generated under `build/temp` and is
+disposable.
 
 ## Recovery contract
 
@@ -36,14 +38,50 @@ global application context remains available directly as
 `[Android.App.Application]::Context`. The host publishes the fixed file
 directory as `$PSScriptRoot` before invoking the profile source.
 
-## Build and install
+## Reproduce the toolchain
 
-Prerequisites are the .NET 11 SDK with the Android workload and an Android SDK.
+Use the PowerShell 7.7 preview 4 / .NET 11 host at `C:\bin\pwsh\pwsh.exe`.
+Do not use whichever `pwsh` happens to be first on `PATH`.
+
+The Android workload materializer downloads the workload manifests and every
+declared pack directly from NuGet. It also explicitly installs and seeds the
+NuGet global-package layout for `Microsoft.NETCore.App.Runtime.android-arm`,
+including `libcoreclr.so` and `libclrjit.so`, because the supported workload
+policy does not deliver the contemporary ARM32 CoreCLR target. Run it elevated
+when repairing or recreating the toolchain:
 
 ```powershell
-dotnet restore .\AndroidSMA.csproj
-dotnet build .\AndroidSMA.csproj -c Debug
-dotnet build .\AndroidSMA.csproj -c Debug -t:Install
+C:\bin\pwsh\pwsh.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\Scripts\Install-AndroidWorkload.ps1
+```
+
+## Build
+
+`Build-AndroidSMA.ps1` is the only authored build entry point. ARM64 Release is
+the default and produces the regular `dev.mansfieldplumbing.androidsma` app:
+
+```powershell
+C:\bin\pwsh\pwsh.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\Build-AndroidSMA.ps1
+```
+
+Build the ARM32 CoreCLR application for 32-bit Android devices with:
+
+```powershell
+C:\bin\pwsh\pwsh.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\Build-AndroidSMA.ps1 -RuntimeIdentifier android-arm
+```
+
+Both targets accept `-Configuration Debug`. Debug APKs are debuggable, allowing
+ADB `run-as` to replace `PROFILE.PS1` and its supporting scripts directly in
+private app storage. Use `-ApplicationId dev.mansfieldplumbing.androidsma.preview`
+only when a side-by-side test installation is intentional.
+
+Outputs are isolated by target and configuration:
+
+```text
+build/apk/android-arm64/Release/.../dev.mansfieldplumbing.androidsma-Signed.apk
+build/apk/android-arm/Release/.../dev.mansfieldplumbing.androidsma-Signed.apk
 ```
 
 The APK packages the small PowerShell native compatibility shim under the name

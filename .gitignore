@@ -31,3 +31,6 @@ Thumbs.db
 *.log
 *.tmp
 .device-tests/
+
+# Re-creatable persistence proof binaries
+/research/Persistence/artifacts/

@@ -1,13 +1,22 @@
 # AndroidSMA working source index
 
-This tree keeps executable PowerShell beside the evidence that constrains it. Nothing listed here participates in the APK build merely by existing; `AndroidSMA.csproj` still compiles only `MainActivity.cs`.
+This tree keeps the authored Android manifest and executable PowerShell beside
+the evidence that constrains them. `Build-AndroidSMA.ps1` is the only build
+entry point; it emits `AndroidSMA.dll` from PowerShell-authored expression
+graphs and generates a disposable packaging project under `build/`.
 
-## Boot
+## Android host
 
-- `Boot/Recovery.ps1` is the draft durable PS1 boot/recovery stratum.
-- `Boot/RECOVERY_PRESERVATION.md` freezes the current green recovery behavior, its intents, discovered defects, and the device proof gates required before removing semantics from `MainActivity.cs`.
+- `Android/AndroidManifest.xml` declares the emitted
+  `AndroidSMA.MainActivity` entry point.
+- `../Scripts/Emit-AndroidSMA.ps1` emits the lifecycle, runspace admission, and
+  recovery system as ordinary persisted CLR code.
+- `PROFILE.CanvasDemo.ps1` is the minimal profile that starts
+  `CanvasDemo.ps1`.
 
-The recovery screen is an invariant. The goal is to remove application policy from `MainActivity.cs`, not remove recovery.
+The recovery screen remains available even when `PROFILE.PS1` is absent or
+broken. There is no authored `MainActivity.cs`, maintained `.csproj`, or
+interpreted recovery script in the production build path.
 
 ## Assembly
 

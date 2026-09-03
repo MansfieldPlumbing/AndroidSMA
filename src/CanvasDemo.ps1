@@ -2,7 +2,9 @@
 using namespace System
 using namespace System.Diagnostics
 
-param([Parameter(Mandatory)] $Event)
+param(
+    [Android.App.Activity] $Activity = $global:Activity
+)
 
 # Traceable Android platform-edge port of the immutable donor:
 # S:\dev\PowerShellDesktop\DirectPortDesktop\terminal.ps1
@@ -17,6 +19,7 @@ if ($null -eq $script:Cells) {
     $script:Columns = 1
     $script:Rows = 1
     $script:Mode = [CanvasMode]::Touch
+    $global:CanvasSelectedModeIndex = 0
     $script:Frame = 0
     # Android physical pixels are denser than the donor's 1000 x 650 desktop
     # window. Scale 2 yields a comparable approximately 4,000-cell workload.
@@ -185,9 +188,13 @@ function global:Build-Cells([int] $ViewWidth, [int] $ViewHeight) {
 
     # Toolbar is itself cells; click ranges are reconstructed from these labels.
     $toolbarX = 0
-    foreach ($button in $labels) {
-        $selected = $button.Mode -eq $mode
-        Put-Text $cells $columns $rows $toolbarX 0 $button.Text $(if ($selected) { 15 } else { 7 }) $(if ($selected) { 4 } else { 8 })
+    for ($buttonIndex = 0; $buttonIndex -lt $labels.Count; $buttonIndex++) {
+        $button = $labels[$buttonIndex]
+        $focused = $buttonIndex -eq $global:CanvasSelectedModeIndex
+        $active = $button.Mode -eq $mode
+        Put-Text $cells $columns $rows $toolbarX 0 $button.Text `
+            $(if ($focused) { 15 } elseif ($active) { 14 } else { 7 }) `
+            $(if ($focused) { 4 } elseif ($active) { 8 } else { 8 })
         $toolbarX += $button.Text.Length
     }
     if ($toolbarX -lt $columns) {
@@ -563,8 +570,10 @@ function global:Invoke-AndroidCanvasInput {
 
     if ($leftDown -and -not $script:AndroidCanvasEdge.PreviousLeft -and $cellY -eq 0) {
         $hitX = 0
-        foreach ($button in $labels) {
+        for ($buttonIndex = 0; $buttonIndex -lt $labels.Count; $buttonIndex++) {
+            $button = $labels[$buttonIndex]
             if ($cellX -ge $hitX -and $cellX -lt ($hitX + $button.Text.Length)) {
+                $global:CanvasSelectedModeIndex = $buttonIndex
                 Set-Mode $button.Mode
                 break
             }
@@ -661,8 +670,10 @@ function global:Invoke-AndroidCanvasFrame {
     }
 }
 
-$activity = $Event.Activity
-$service = $PSAndroid.Service
+$activity = $Activity
+if ($null -eq $activity) {
+    throw 'CanvasDemo.ps1 requires AndroidSMA to provide $Activity, or an Activity passed with -Activity.'
+}
 $generation = [Guid]::NewGuid()
 $frequency = [double][Stopwatch]::Frequency
 if ($null -ne $script:AndroidCanvasEdge) {
@@ -676,13 +687,13 @@ $paint.AntiAlias = $true
 [void]$paint.SetTypeface([Android.Graphics.Typeface]::Monospace)
 $edge = [pscustomobject]@{
     Activity = $activity
-    Service = $service
     Surface = $null
     Paint = $paint
     Generation = $generation
     Active = $true
     Tick = $null
     Touch = $null
+    KeyPress = $null
     HintManager = $null
     HintSession = $null
     TargetNanos = [long]8333333
@@ -732,6 +743,28 @@ $script:Dirty = $true
 }.GetNewClosure()
 $edge.Touch = $touch
 
+[scriptblock] $keyPress = {
+    param($sender, $eventArgs)
+
+    if ($eventArgs.Event.Action -ne [Android.Views.KeyEventActions]::Down) { return }
+    $keyCode = $eventArgs.KeyCode
+    $lastIndex = $labels.Count - 1
+    if ($keyCode -eq [Android.Views.Keycode]::DpadLeft) {
+        $global:CanvasSelectedModeIndex = if ($global:CanvasSelectedModeIndex -le 0) { $lastIndex } else { $global:CanvasSelectedModeIndex - 1 }
+        Set-Mode $labels[$global:CanvasSelectedModeIndex].Mode
+    }
+    elseif ($keyCode -eq [Android.Views.Keycode]::DpadRight) {
+        $global:CanvasSelectedModeIndex = if ($global:CanvasSelectedModeIndex -ge $lastIndex) { 0 } else { $global:CanvasSelectedModeIndex + 1 }
+        Set-Mode $labels[$global:CanvasSelectedModeIndex].Mode
+    }
+    else { return }
+    $script:Dirty = $true
+    $eventArgs.Handled = $true
+    [Android.Util.Log]::Info('PowerShell',
+        "Canvas remote key=$keyCode mode=$($labels[$global:CanvasSelectedModeIndex].Text.Trim())")
+}.GetNewClosure()
+$edge.KeyPress = $keyPress
+
 [Action] $onAnimation = [Action]{
     try {
         if ($edge.Active -and $null -ne $edge.Surface -and $edge.Surface.IsAttachedToWindow) {
@@ -744,7 +777,12 @@ $edge.Touch = $touch
             "Canvas tick failed: $_ stack=$($_.ScriptStackTrace)")
     }
 }.GetNewClosure()
-$tick = [TerminalMvp.AndroidAnimationRunnable]::new($onAnimation)
+[AndroidSMA.RecoveryProgram]::SetAnimationCallback($onAnimation)
+$callbackMethod = [AndroidSMA.RecoveryProgram].GetMethod(
+    'RunAnimationCallback',
+    [Reflection.BindingFlags]'Public,Static')
+[Action] $animationCallback = $callbackMethod.CreateDelegate([Action])
+$tick = [Java.Lang.Runnable]::new($animationCallback)
 $edge.Tick = $tick
 
 [Action] $attach = [Action]{
@@ -752,12 +790,17 @@ $edge.Tick = $tick
     $surface.KeepScreenOn = $true
     $surface.Focusable = $true
     $surface.FocusableInTouchMode = $true
-    $surface.RequestedFrameRate = [single]120.0
+    [single] $requestedFrameRate = 0
+    if ([int][Android.OS.Build+VERSION]::SdkInt -ge 35) {
+        $surface.RequestedFrameRate = [single]120.0
+        $requestedFrameRate = $surface.RequestedFrameRate
+    }
     $surface.add_Touch($touch)
+    $surface.add_KeyPress($keyPress)
     $edge.Surface = $surface
     $activity.SetContentView($surface)
     [Android.Util.Log]::Info('PowerShell',
-        "Canvas window touchBoost=$($activity.Window.FrameRateBoostOnTouchEnabled) requestedFrameRate=$($surface.RequestedFrameRate)")
+        "Canvas window touchBoost=$($activity.Window.FrameRateBoostOnTouchEnabled) requestedFrameRate=$requestedFrameRate")
     [void]$surface.RequestFocus()
 
     try {
@@ -781,4 +824,4 @@ $edge.Tick = $tick
         "Canvas attached view=$($surface.GetType().FullName) generation=$generation scheduler=PostOnAnimation")
 }.GetNewClosure()
 
-$service.RunOnMainThread($activity, $attach)
+$activity.RunOnUiThread($attach)
